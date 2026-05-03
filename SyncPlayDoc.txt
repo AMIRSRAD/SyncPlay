@@ -1,0 +1,246 @@
+SyncPlay - Project Design Document
+Lightweight Windows Media Player with Relay or P2P Sync
+
+Stack: C++20 + Win32 + Dear ImGui + libmpv + libdatachannel + miniaudio
+
+1. Project Overview
+1.1 Purpose
+Build a lightweight Windows media player that supports common video formats and adds synchronized playback across users. Each user plays their own local file; only playback state is synchronized.
+
+1.2 Key Objectives
+- High-performance local playback
+- Minimal, modern overlay UI
+- Accurate sync with low drift
+- Secure, low-latency relay or peer-to-peer sync
+- Simple host/guest workflow
+
+2. Core Requirements
+2.1 Functional Requirements
+Local Playback
+- Load local media files (Open dialog + drag/drop)
+- Supported formats: MKV, MP4, MOV, AVI, WebM
+- Controls: Play/Pause, Seek, Volume, Speed (0.5x-2.0x), Fullscreen
+- Playlist queue with next/prev controls
+- Advanced video controls (color, tone mapping, shaders)
+- Subtitles: embedded + external files
+- Audio/Sub track selection + subtitle delay
+- Subtitle styling controls (font, size, color, position, outline)
+
+Sync Mode
+- Two users connect to a shared session (relay or P2P)
+- Both users load the same media file
+- Playback sync includes: time, play/pause, speed
+- Host is authoritative; guest follows (guest control optional)
+- File verification before sync (size, duration, partial hash for P2P)
+
+Chat
+- Text chat during session
+- Timestamped messages
+- Sender/receiver alignment
+- Emoji picker
+
+File Share (relay)
+- Share files via signaling server relay
+- Received files saved to Downloads with clickable link in chat
+
+Voice Call (1:1)
+- Optional voice call using WebRTC (libdatachannel)
+- TURN preferred (relay transport policy)
+
+2.2 Non-Functional Requirements
+- Low CPU/memory usage
+- Fast startup
+- No media transfer over network
+
+3. Technology Stack
+3.1 Language & Framework
+- C++20
+- Win32 for windowing
+- Dear ImGui for UI
+
+3.2 Media Backend
+- libmpv for demuxing/decoding
+- Software render (MPV_RENDER_API_TYPE_SW) to CPU buffers
+- Upload to D3D11 texture for display
+
+3.3 Networking
+- WebRTC data channels (libdatachannel)
+- NAT traversal (TURN supported; STUN optional)
+- Encrypted transport
+- Relay signaling for WAN-friendly sync/chat/file info
+- Voice call audio capture/playback via miniaudio
+
+3.4 Signaling
+- Embedded WebSocket signaling server
+- Session creation and offer/answer exchange (P2P)
+- Relay mode for sync/chat/file info
+- Multi-guest support in relay mode
+
+4. System Architecture
+4.1 High-Level Architecture
+Relay Mode:
+Host App  <---- WebSocket Relay ---->  Guest App(s)
+   \__ Embedded Signaling Server (host) __/
+
+P2P Mode:
+Host App  <---- WebRTC Data Channel ---->  Guest App
+   \__ Embedded Signaling Server (host) __/
+
+4.2 Principles
+- Host-authoritative timeline
+- Relay or P2P data flow
+- Signaling server can relay sync/chat/file info
+
+5. Media Playback Architecture
+5.1 Playback Pipeline
+File -> libmpv demux -> decode -> software render -> CPU buffer -> D3D11 texture -> ImGui
+
+5.2 Playback Clock
+- Each peer tracks a local clock
+- Host clock is authoritative
+- Guest corrects using small speed nudges or seek for large drift
+
+6. Peer-to-Peer Sync Design
+6.1 Host vs Guest
+Host: authoritative state sender
+Guest: follower, applies corrections
+
+6.2 File Verification
+Sync only if:
+- File size matches
+- Duration matches (tolerant)
+- Partial hash matches
+
+6.3 State Packets
+Example:
+{
+  "timestamp": 523.418,
+  "playing": true,
+  "speed": 1.0
+}
+
+6.4 Sync Timing
+- Host sends state ~ every 250ms
+- Guest compares drift
+- Small drift -> speed correction
+- Large drift -> seek
+
+7. Networking Flow
+Relay Mode:
+1) Host starts session (signaling server)
+2) Host shares code (and optional password)
+3) Guest joins with URL + code
+4) Signaling server relays sync/chat/file info
+5) Sync starts after file readiness
+
+P2P Mode:
+1) Host starts session (signaling server)
+2) Host shares code (and optional password)
+3) Guest joins with URL + code
+4) WebRTC data channel established
+5) Sync starts after file verification
+
+Voice Call (1:1):
+- Optional voice call using WebRTC
+- TURN preferred (relay transport policy)
+
+8. UI Design (Win32 ImGui)
+- Single fullscreen "Surface" overlay (no floating ImGui windows for UI)
+- Video fills window; overlays fade in/out with hover
+- Top bar: icon-only buttons (Open, Subs, Fullscreen, Chat, Session, Settings)
+- Bottom controls:
+  - Custom timeline (full width) with hover glow + scrub preview
+  - Time labels under timeline (left elapsed, right total)
+  - Center transport row (Stop, Prev, -10s, Play/Pause, +10s, Next)
+  - Right volume row: speaker/mute + custom volume slider
+  - Speed selector on left + aspect ratio + playlist
+- Custom title bar (windowed) with app icon, app name, and centered media title
+- Fullscreen bottom bar can be compact/centered
+- Sync indicator dot in the timeline knob when a session is connected
+- Toast notifications for key actions (play/pause, speed, seek, volume, session join/leave)
+- First-run Windows "Open with" registration (per-user, defaults unchanged)
+- Right panels (Chat / Session / Settings / Subs):
+  - Two modes: Overlay (default) and Sidebar.
+  - Overlay: panels float over video, draggable + resizable; pin snaps to default top-right size.
+  - Sidebar: video shrinks; panels dock to the right, full height, width resizable from the left edge.
+  - Overlay/Sidebar toggle affects all panels; pin/unpin is per-panel overlay behavior.
+  - Subtitle panel includes styling controls (font, size, color, position, outline).
+  - Transparent overlays with subtle shadow and fade
+- UI styling:
+  - Icon font (Segoe MDL2 Assets)
+  - Typography hierarchy (16 base, 18 timeline labels, 22 headers)
+  - Subtle hover glow on sliders and icons
+  - Reduced borders (FrameBorderSize/WindowBorderSize = 0)
+  - Gradient + shadow for depth
+  - Accent color is configurable in Appearance settings
+
+9. Error Handling
+- Invalid URL or missing code -> clear error message
+- Reconnect attempts with status
+- Host rejoin logic after guest disconnect
+
+10. Security & Privacy
+- Encrypted P2P channel
+- No media transfer
+- No metadata stored on signaling server
+
+11. Current Project Structure
+core/
+  playback_controller.h
+  playback_clock.h
+  base64.h
+  logging.h
+  sha1.h
+  string_utils.h
+  task_queue.h
+  utf.h
+  utf.cpp
+media/
+  mpv_helpers.h
+  mpv_helpers.cpp
+platform/
+  platform.h
+  platform.cpp
+  file_dialog.h
+  file_dialog.cpp
+render/
+  render_sw.h
+  render_sw.cpp
+src/
+  main.cpp
+sync/
+  sync_manager.h
+  sync_manager.cpp
+  sync_session.h
+  sync_session.cpp
+network/
+  p2p_peer.h
+  p2p_peer.cpp
+  signaling_client.h
+  signaling_client.cpp
+  signaling_server.h
+  signaling_server.cpp
+  voice_peer.h
+  voice_peer.cpp
+ui/
+  app_state.h
+  app_state.cpp
+  ui_helpers.h
+  ui_helpers.cpp
+  panel_utils.h
+  panel_utils.cpp
+
+12. Roadmap (Short)
+- Improve WAN setup UX
+- More robust sync diagnostics
+- Optional multi-peer sessions for P2P
+- Light theme
+
+13. Out of Scope
+- Media streaming
+- Library management
+- DRM handling
+- Mobile platforms
+
+14. Summary
+SyncPlay delivers a modern, lightweight Windows player with relay or P2P sync, in-session chat, file sharing via relay, and optional 1:1 voice calling. The host-authoritative model keeps timing stable while avoiding media streaming and heavy infrastructure.

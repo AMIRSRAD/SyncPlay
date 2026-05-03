@@ -1,0 +1,56 @@
+# Build outputs
+/build/
+/cmake-build-*/
+/out/
+/dist/
+/publish/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+build.ninja
+install_manifest.txt
+Testing/
+
+# vcpkg generated/install outputs
+/vcpkg_installed/
+/.vcpkg-root
+vcpkg-manifest-install.log
+
+# Unused extracted/downloaded vendor archives
+/third_party/imgui-*/
+/third_party/*.tar.gz
+
+# Compiler/linker artifacts
+*.obj
+*.o
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.idb
+*.res
+*.manifest
+*.dll
+*.exe
+
+# Runtime/config files
+imgui.ini
+syncplay.log
+*.log
+
+# IDE/editor state
+/.vs/
+/.idea/
+/.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# OS noise
+Thumbs.db
+Desktop.ini
+.DS_Store

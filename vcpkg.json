@@ -1,0 +1,9 @@
+{
+  "name": "syncplay",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "libdatachannel",
+    "miniaudio",
+    "nlohmann-json"
+  ]
+}
