@@ -6,12 +6,9 @@ SyncPlay is a Windows watch-party media player. Everyone plays their own local m
 
 ## Screenshots
 
-Screenshots/GIFs should go here before publishing the repository.
-
 ```text
-assets/screenshots/main.png
-assets/screenshots/chat-files.png
-assets/screenshots/session.png
+assets/ss/main.png
+
 ```
 
 ## Features
