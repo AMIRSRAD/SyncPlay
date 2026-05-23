@@ -52,11 +52,9 @@ The current default path does not use STUN, TURN, Google servers, or WebRTC P2P.
 
 ## Download / Run
 
-No packaged release is documented yet. For now, build from source and run:
+https://github.com/AMIRSRAD/SyncPlay/releases/tag/Release
 
-```text
-cmake-build-release/SyncPlay.exe
-```
+
 
 On first run, SyncPlay may register itself as an Open With option for common video formats. This is per-user and does not take over default file associations.
 
