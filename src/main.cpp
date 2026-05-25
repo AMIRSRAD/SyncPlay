@@ -2044,14 +2044,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             const float topBgAlpha = topBarFullscreenStyle ? 0.45f : 0.90f;
             topBg.w = topBgAlpha * topFade;
             ImGui::SetCursorPos(ImVec2(topBarX, topBarY));
-            {
-                ImDrawList* dl = ImGui::GetWindowDrawList();
-                const float rounding = ImGui::GetStyle().ChildRounding;
-                const ImU32 shadowCol = ImGui::GetColorU32(ImVec4(0, 0, 0, 0.25f * topFade));
-                dl->AddRectFilled(ImVec2(topBarX, topBarY + 2.0f),
-                                  ImVec2(topBarX + topBarWidth, topBarY + 2.0f + topBarH),
-                                  shadowCol, rounding + 2.0f);
-            }
             ImGui::PushStyleColor(ImGuiCol_ChildBg, topBg);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, topPad);
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, topItemSpacing);
@@ -2171,24 +2163,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             const float compactTargetW = std::min(viewW, std::max(compactMinW, viewW * 0.60f));
             const float controlsW = (g_fullscreen ? compactTargetW : viewW);
             const float controlsX = (g_fullscreen ? (viewW - controlsW) * 0.5f : 0.0f);
-            {
-                ImDrawList* dl = ImGui::GetWindowDrawList();
-                const float rounding = ImGui::GetStyle().ChildRounding;
-                const ImU32 shadowCol = ImGui::GetColorU32(ImVec4(0, 0, 0, 0.35f * bottomFade));
-                dl->AddRectFilled(ImVec2(controlsX, controlsY + tune(2.0f)),
-                                  ImVec2(controlsX + controlsW, controlsY + barHeightUi + tune(2.0f)),
-                                  shadowCol, rounding + 2.0f);
-            }
             ImGui::SetCursorPos(ImVec2(controlsX, controlsY));
-            {
-                ImDrawList* dl = ImGui::GetWindowDrawList();
-                const ImU32 gradTop = ImGui::GetColorU32(ctrlGrad);
-                const ImU32 gradBot = ImGui::GetColorU32(ctrlBg);
-                dl->AddRectFilledMultiColor(ImVec2(controlsX, controlsY),
-                                            ImVec2(controlsX + controlsW, controlsY + barHeightUi),
-                                            gradTop, gradTop, gradBot, gradBot);
-            }
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ctrlBg);
             const float controlsPadX = std::max(tune(2.0f), basePad.x - tune(8.0f)) + tune(5.0f);
             const ImVec2 controlsPad(controlsPadX, 0.0f);
             const ImVec2 controlsSpacing(std::max(tune(2.0f), style.ItemSpacing.x - tune(4.0f)),
