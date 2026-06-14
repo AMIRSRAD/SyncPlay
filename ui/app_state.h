@@ -53,6 +53,7 @@ struct AppState {
     bool subsDocked = true;
     bool settingsDocked = true;
     bool sidePanels = false;
+    bool glassPanels = true;
     bool allowGuestControl = true;
     bool autoPromote = false;
     bool lanMode = false;

@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "../platform/platform.h"
+
 namespace {
 void ClampPanel(float* pos, float* size, float minW, float minH, float maxW, float maxH,
                 float edgePad, int ui_w, int ui_h) {
@@ -92,31 +94,70 @@ void UpdatePanelDrag(PanelDragState& state, float* pos, float* size,
 
 static void BeginPanelImpl(const char* id, const ImVec2& pos, const ImVec2& size,
                            float alpha, float panelFade, const ImVec2& basePad,
-                           ImGuiWindowFlags flags) {
-    ImVec4 bg = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
-    bg.w = alpha * panelFade;
-    ImGui::SetCursorPos(pos);
+                           ImGuiWindowFlags flags, float padScale) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float rounding = ImGui::GetStyle().ChildRounding;
-    const ImU32 shadowCol = ImGui::GetColorU32(ImVec4(0, 0, 0, 0.25f * panelFade));
-    dl->AddRectFilled(ImVec2(pos.x, pos.y + 2.0f),
-                      ImVec2(pos.x + size.x, pos.y + size.y + 2.0f),
-                      shadowCol, rounding + 2.0f);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, bg);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, basePad);
+    const ImVec2 pMin = pos;
+    const ImVec2 pMax(pos.x + size.x, pos.y + size.y);
+
+    // Frosted-glass backdrop: draw the blurred frame behind the panel, UV-mapped
+    // to this panel's on-screen region (the Surface window is at 0,0, so panel
+    // coords are screen coords), then a translucent tint, a top highlight and a
+    // light glass border.
+    bool frosted = false;
+    if (g_blurSrv && g_blurReady) {
+        // The blur texture is a downsample of the video frame, which is drawn from
+        // (0,0) to (g_videoTexW, g_videoTexH) — NOT the full window (the bottom bar and
+        // any side dock are excluded). Map panel coords over the video rect, not the
+        // DisplaySize, so the frosted backdrop lines up with what's actually behind it.
+        const float vw = static_cast<float>(g_videoTexW);
+        const float vh = static_cast<float>(g_videoTexH);
+        if (vw > 1.0f && vh > 1.0f) {
+            const ImVec2 uvMin(pMin.x / vw, pMin.y / vh);
+            const ImVec2 uvMax(pMax.x / vw, pMax.y / vh);
+            dl->AddImageRounded(reinterpret_cast<ImTextureID>(g_blurSrv), pMin, pMax, uvMin, uvMax,
+                                ImGui::GetColorU32(ImVec4(1, 1, 1, panelFade)), rounding);
+            ImVec4 tint = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
+            tint.w = 0.52f * panelFade;
+            dl->AddRectFilled(pMin, pMax, ImGui::ColorConvertFloat4ToU32(tint), rounding);
+            dl->AddRect(pMin, pMax, ImGui::GetColorU32(ImVec4(1, 1, 1, 0.10f * panelFade)),
+                        rounding, 0, 1.0f);
+            frosted = true;
+        }
+    }
+
+    ImVec4 childBg(0.0f, 0.0f, 0.0f, 0.0f);
+    if (!frosted) {
+        childBg = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
+        childBg.w = alpha * panelFade;
+    }
+    // Generous inner padding so titles/content don't hug the panel corner.
+    // Derive it from the font size (DPI-aware) rather than basePad/WindowPadding,
+    // which the Surface window's zero-padding leaves at ~0 by the time we get here.
+    const float fs = ImGui::GetFontSize();
+    // padScale shrinks the whole padding (including the basePad floor) so a panel
+    // can go tighter than the default WindowPadding when it asks for it (e.g. Chat).
+    ImVec2 panelPad(std::max(basePad.x, fs * 1.6f), std::max(basePad.y, fs * 1.25f));
+    panelPad.x *= padScale;
+    panelPad.y *= padScale;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, childBg);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, panelPad);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, panelFade);
-    ImGui::BeginChild(id, size, true, flags);
+    ImGui::SetCursorPos(pos);
+    // AlwaysUseWindowPadding: a borderless child otherwise ignores WindowPadding,
+    // which made the frosted panels' content hug the top-left corner.
+    ImGui::BeginChild(id, size, !frosted, flags | ImGuiWindowFlags_AlwaysUseWindowPadding);
 }
 
 void BeginPanel(const char* id, const ImVec2& pos, const ImVec2& size,
-                float alpha, float panelFade, const ImVec2& basePad) {
-    BeginPanelImpl(id, pos, size, alpha, panelFade, basePad, ImGuiWindowFlags_None);
+                float alpha, float panelFade, const ImVec2& basePad, float padScale) {
+    BeginPanelImpl(id, pos, size, alpha, panelFade, basePad, ImGuiWindowFlags_None, padScale);
 }
 
 void BeginPanelNoScroll(const char* id, const ImVec2& pos, const ImVec2& size,
-                        float alpha, float panelFade, const ImVec2& basePad) {
+                        float alpha, float panelFade, const ImVec2& basePad, float padScale) {
     BeginPanelImpl(id, pos, size, alpha, panelFade, basePad,
-                   ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                   ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse, padScale);
 }
 
 void EndPanel() {

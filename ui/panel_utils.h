@@ -17,9 +17,9 @@ void UpdatePanelDrag(PanelDragState& state, float* pos, float* size,
                      int ui_w, int ui_h);
 
 void BeginPanel(const char* id, const ImVec2& pos, const ImVec2& size,
-                float alpha, float panelFade, const ImVec2& basePad);
+                float alpha, float panelFade, const ImVec2& basePad, float padScale = 1.0f);
 void BeginPanelNoScroll(const char* id, const ImVec2& pos, const ImVec2& size,
-                        float alpha, float panelFade, const ImVec2& basePad);
+                        float alpha, float panelFade, const ImVec2& basePad, float padScale = 1.0f);
 void EndPanel();
 
 void DockResizeHandle(const char* id, float panelWidth, float panelHeight,

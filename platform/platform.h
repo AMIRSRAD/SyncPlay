@@ -18,6 +18,17 @@ extern ID3D11ShaderResourceView* g_videoSrv;
 extern int g_videoTexW;
 extern int g_videoTexH;
 
+// Small downsampled+blurred copy of the current frame, used as a frosted-glass
+// backdrop behind the overlay panels.
+extern ID3D11Texture2D* g_blurTex;
+extern ID3D11ShaderResourceView* g_blurSrv;
+extern int g_blurTexW;
+extern int g_blurTexH;
+extern bool g_blurReady;
+// When false, the per-frame blur downsample is skipped and panels render solid
+// (saves CPU on low-end systems). Toggled from the Settings > Appearance panel.
+extern bool g_glassEnabled;
+
 extern HWND g_hWnd;
 extern bool g_fullscreen;
 extern WINDOWPLACEMENT g_wpPrev;
@@ -52,5 +63,7 @@ void CreateRenderTarget();
 void CleanupRenderTarget();
 void CleanupVideoTexture();
 void EnsureVideoTexture(int w, int h);
+void CleanupBlurTexture();
+void EnsureBlurTexture(int w, int h);
 void ToggleFullscreen(HWND hWnd);
 void ApplyCustomWindowChrome(HWND hWnd);

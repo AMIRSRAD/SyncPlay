@@ -83,6 +83,7 @@ void load_config(AppState& app, float* volume, float* speed) {
     app.autoPromote = j.value("autoPromote", app.autoPromote);
     app.allowGuestControl = j.value("allowGuestControl", app.allowGuestControl);
     app.sidePanels = j.value("sidePanels", app.sidePanels);
+    app.glassPanels = j.value("glassPanels", app.glassPanels);
     app.chatPos[0] = j.value("chatPosX", app.chatPos[0]);
     app.chatPos[1] = j.value("chatPosY", app.chatPos[1]);
     app.chatSize[0] = j.value("chatSizeW", app.chatSize[0]);
@@ -147,6 +148,7 @@ void save_config(const AppState& app, float volume, float speed) {
     j["autoPromote"] = app.autoPromote;
     j["allowGuestControl"] = app.allowGuestControl;
     j["sidePanels"] = app.sidePanels;
+    j["glassPanels"] = app.glassPanels;
     j["chatPosX"] = app.chatPos[0];
     j["chatPosY"] = app.chatPos[1];
     j["chatSizeW"] = app.chatSize[0];

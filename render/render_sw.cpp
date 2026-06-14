@@ -1,11 +1,54 @@
 #include "render_sw.h"
 
 #include <mpv/client.h>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
 #include "platform/platform.h"
+
+// Downsample the current frame into the small blur texture used as the panels'
+// frosted-glass backdrop. Cheap box-average (sparse samples per block); the
+// bilinear upscale at draw time does the rest of the softening.
+static void produce_blur(const uint8_t* src, int w, int h, size_t stride) {
+    const int factor = std::max(1, static_cast<int>(std::lround(w / 240.0)));
+    const int bw = std::max(1, w / factor);
+    const int bh = std::max(1, h / factor);
+    EnsureBlurTexture(bw, bh);
+    if (!g_blurTex)
+        return;
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(g_pd3dDeviceContext->Map(g_blurTex, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+        return;
+    const int step = std::max(1, factor / 3);
+    uint8_t* dstBase = static_cast<uint8_t*>(mapped.pData);
+    for (int oy = 0; oy < bh; ++oy) {
+        uint32_t* drow = reinterpret_cast<uint32_t*>(dstBase + static_cast<size_t>(oy) * mapped.RowPitch);
+        const int sy0 = oy * factor;
+        for (int ox = 0; ox < bw; ++ox) {
+            const int sx0 = ox * factor;
+            unsigned r = 0, g = 0, b = 0, n = 0;
+            for (int dy = 0; dy < factor; dy += step) {
+                const int sy = sy0 + dy;
+                if (sy >= h) break;
+                const uint8_t* srow = src + static_cast<size_t>(sy) * stride;
+                for (int dx = 0; dx < factor; dx += step) {
+                    const int sx = sx0 + dx;
+                    if (sx >= w) break;
+                    const uint8_t* p = srow + static_cast<size_t>(sx) * 4;
+                    b += p[0]; g += p[1]; r += p[2];
+                    ++n;
+                }
+            }
+            if (n == 0) n = 1;
+            drow[ox] = 0xFF000000u | ((r / n) << 16) | ((g / n) << 8) | (b / n);
+        }
+    }
+    g_pd3dDeviceContext->Unmap(g_blurTex, 0);
+    g_blurReady = true;
+}
 
 void mpv_render_update(void* ctx) {
     auto* state = static_cast<SwRenderState*>(ctx);
@@ -118,4 +161,8 @@ void update_video_texture(SwRenderState& state) {
         }
         g_pd3dDeviceContext->Unmap(g_videoTex, 0);
     }
+    if (g_glassEnabled)
+        produce_blur(src, w, h, stride);
+    else
+        g_blurReady = false;
 }

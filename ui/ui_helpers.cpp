@@ -58,6 +58,25 @@ void PopIconGlowOffset() {
         g_glowOffsetStack.pop_back();
 }
 
+void StyledTooltip(const char* text) {
+    if (!text || !text[0])
+        return;
+    // Tooltips inherit the Surface window's pushed WindowRounding(0)/WindowPadding(0)
+    // for the rest of the frame, so style them explicitly to match the glass theme:
+    // a softly rounded, padded, translucent-dark popup with a faint light border.
+    const float fs = ImGui::GetFontSize();
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, fs * 0.5f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(fs * 0.7f, fs * 0.45f));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.09f, 0.10f, 0.13f, 0.96f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1.0f, 1.0f, 1.0f, 0.16f));
+    if (ImGui::BeginTooltip()) {
+        ImGui::TextUnformatted(text);
+        ImGui::EndTooltip();
+    }
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(2);
+}
+
 void ShowDelayedTooltip(const char* text, float delaySeconds) {
     if (!text || !text[0])
         return;
@@ -71,7 +90,7 @@ void ShowDelayedTooltip(const char* text, float delaySeconds) {
             s_hoverStart = now;
         }
         if ((now - s_hoverStart) >= delaySeconds)
-            ImGui::SetTooltip("%s", text);
+            StyledTooltip(text);
     } else if (id == s_hoverId) {
         s_hoverId = 0;
         s_hoverStart = 0.0;

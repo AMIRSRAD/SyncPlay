@@ -44,6 +44,13 @@ ID3D11ShaderResourceView* g_videoSrv = nullptr;
 int g_videoTexW = 0;
 int g_videoTexH = 0;
 
+ID3D11Texture2D* g_blurTex = nullptr;
+ID3D11ShaderResourceView* g_blurSrv = nullptr;
+int g_blurTexW = 0;
+int g_blurTexH = 0;
+bool g_blurReady = false;
+bool g_glassEnabled = true;
+
 HWND g_hWnd = nullptr;
 bool g_fullscreen = false;
 WINDOWPLACEMENT g_wpPrev = { sizeof(g_wpPrev) };
@@ -373,5 +380,36 @@ void EnsureVideoTexture(int w, int h) {
         g_pd3dDevice->CreateShaderResourceView(g_videoTex, nullptr, &g_videoSrv);
         g_videoTexW = w;
         g_videoTexH = h;
+    }
+}
+
+void CleanupBlurTexture() {
+    if (g_blurSrv) { g_blurSrv->Release(); g_blurSrv = nullptr; }
+    if (g_blurTex) { g_blurTex->Release(); g_blurTex = nullptr; }
+    g_blurTexW = 0;
+    g_blurTexH = 0;
+    g_blurReady = false;
+}
+
+void EnsureBlurTexture(int w, int h) {
+    if (w <= 0 || h <= 0)
+        return;
+    if (g_blurTexW == w && g_blurTexH == h && g_blurTex && g_blurSrv)
+        return;
+    CleanupBlurTexture();
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = static_cast<UINT>(w);
+    desc.Height = static_cast<UINT>(h);
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DYNAMIC;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (SUCCEEDED(g_pd3dDevice->CreateTexture2D(&desc, nullptr, &g_blurTex))) {
+        g_pd3dDevice->CreateShaderResourceView(g_blurTex, nullptr, &g_blurSrv);
+        g_blurTexW = w;
+        g_blurTexH = h;
     }
 }

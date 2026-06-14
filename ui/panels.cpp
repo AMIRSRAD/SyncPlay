@@ -160,7 +160,7 @@ void DrawSettingsPanel(PanelContext& ctx) {
                     }
                     if (!hasShaders)
                         ImGui::EndDisabled();
-                    ImGui::BeginChild("ShaderList", ImVec2(0.0f, tune(140.0f)), true);
+                    ImGui::BeginChild("ShaderList", ImVec2(0.0f, tune(140.0f)), false);
                     if (ImGui::BeginTable("ShaderTable", 2, ImGuiTableFlags_SizingStretchProp)) {
                         ImGui::TableSetupColumn("Shader", ImGuiTableColumnFlags_WidthStretch);
                         ImGui::TableSetupColumn("Remove", ImGuiTableColumnFlags_WidthFixed);
@@ -204,6 +204,11 @@ void DrawSettingsPanel(PanelContext& ctx) {
                         applyAccent(app.accentColor);
                         app.dirty = true;
                     }
+                    ImGui::Separator();
+                    ImGui::TextUnformatted("Panels");
+                    if (ImGui::Checkbox("Frosted glass (blur)", &app.glassPanels))
+                        app.dirty = true;
+                    ImGui::TextDisabled("Turn off to save CPU on lower-end systems.");
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Connection")) {
@@ -638,7 +643,7 @@ void DrawSubsPanel(PanelContext& ctx) {
                 app.subtitlesEnabled = subVisible;
                 mpv_set_flag(mpv, "sub-visibility", subVisible);
             }
-            if (ImGui::SliderFloat("Subtitle delay (s)", &app.subtitleDelay, -10.0f, 10.0f, "%.1f")) {
+            if (ImGui::SliderFloat("Delay (s)", &app.subtitleDelay, -10.0f, 10.0f, "%.1f")) {
                 double delay = app.subtitleDelay;
                 mpv_set_property(mpv, "sub-delay", MPV_FORMAT_DOUBLE, &delay);
                 app.dirty = true;
@@ -680,7 +685,7 @@ void DrawSubsPanel(PanelContext& ctx) {
             cstr.reserve(labels.size());
             for (auto& l : labels)
                 cstr.push_back(l.c_str());
-            if (ImGui::Combo("Subtitle Track", &currentIndex, cstr.data(), static_cast<int>(cstr.size()))) {
+            if (ImGui::Combo("Track", &currentIndex, cstr.data(), static_cast<int>(cstr.size()))) {
                 int selected = ids[static_cast<size_t>(currentIndex)];
                 if (selected == 0) {
                     mpv_set_property_string(mpv, "sid", "no");
@@ -698,12 +703,18 @@ void DrawSubsPanel(PanelContext& ctx) {
                                  ImGuiInputTextFlags_AutoSelectAll)) {
                 applySubtitleStyle();
             }
-            if (ImGui::SliderFloat("Font Size", &app.subtitleFontSize, 12.0f, 72.0f, "%.0f"))
+            if (ImGui::SliderFloat("Size", &app.subtitleFontSize, 12.0f, 72.0f, "%.0f"))
                 applySubtitleStyle();
-            if (ImGui::ColorEdit3("Text Color", app.subtitleColor, ImGuiColorEditFlags_DisplayRGB))
+            float subCol4[4] = {app.subtitleColor[0], app.subtitleColor[1],
+                                app.subtitleColor[2], app.subtitleOpacity};
+            if (ImGui::ColorEdit4("Color", subCol4,
+                                  ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
+                app.subtitleColor[0] = subCol4[0];
+                app.subtitleColor[1] = subCol4[1];
+                app.subtitleColor[2] = subCol4[2];
+                app.subtitleOpacity = subCol4[3];
                 applySubtitleStyle();
-            if (ImGui::SliderFloat("Opacity", &app.subtitleOpacity, 0.0f, 1.0f, "%.2f"))
-                applySubtitleStyle();
+            }
             if (ImGui::Checkbox("Bold", &app.subtitleBold))
                 applySubtitleStyle();
             ImGui::SameLine();
@@ -711,23 +722,9 @@ void DrawSubsPanel(PanelContext& ctx) {
                 applySubtitleStyle();
             if (ImGui::SliderFloat("Outline", &app.subtitleBorderSize, 0.0f, 8.0f, "%.1f"))
                 applySubtitleStyle();
-            if (ImGui::SliderFloat("Shadow", &app.subtitleShadowOffset, 0.0f, 8.0f, "%.1f"))
-                applySubtitleStyle();
-            if (ImGui::SliderFloat("Spacing", &app.subtitleSpacing, 0.0f, 8.0f, "%.1f"))
-                applySubtitleStyle();
             if (ImGui::SliderFloat("Position (%)", &app.subtitlePos, 0.0f, 100.0f, "%.0f"))
                 applySubtitleStyle();
-            const char* alignXLabels[] = {"Left", "Center", "Right"};
-            if (ImGui::Combo("Align X", &app.subtitleAlignX, alignXLabels, 3))
-                applySubtitleStyle();
-            const char* alignYLabels[] = {"Top", "Center", "Bottom"};
-            if (ImGui::Combo("Align Y", &app.subtitleAlignY, alignYLabels, 3))
-                applySubtitleStyle();
-            if (ImGui::SliderFloat("Margin X", &app.subtitleMarginX, 0.0f, 200.0f, "%.0f"))
-                applySubtitleStyle();
-            if (ImGui::SliderFloat("Margin Y", &app.subtitleMarginY, 0.0f, 200.0f, "%.0f"))
-                applySubtitleStyle();
-            if (ImGui::Button("Reset Subtitle Style")) {
+            if (ImGui::Button("Reset Style")) {
                 app.subtitleFont[0] = '\0';
                 app.subtitleFontSize = 36.0f;
                 app.subtitleColor[0] = 1.0f;
@@ -793,7 +790,7 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
                 ImGui::BeginChild("ChatPanel", panelSize, false,
                                   ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             } else {
-                BeginPanelNoScroll("ChatPanel", panelPos, panelSize, panelAlpha, panelFade, basePad);
+                BeginPanelNoScroll("ChatPanel", panelPos, panelSize, panelAlpha, panelFade, basePad, 0.6f);
             }
             ImGui::AlignTextToFramePadding();
             if (font22)
@@ -893,7 +890,7 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
             }
             auto renderFilesView = [&]() {
                 const float viewH = std::max(80.0f, ImGui::GetContentRegionAvail().y);
-                ImGui::BeginChild("FilesView", ImVec2(0.0f, viewH), true);
+                ImGui::BeginChild("FilesView", ImVec2(0.0f, viewH), false);
 
                 ImGui::TextDisabled("Transfers: %d active, %d failed", activeTransferCount, failedTransferCount);
                 if (transferRows.empty()) {
@@ -1004,12 +1001,12 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
             } else {
             const bool chatAppearing = ImGui::IsWindowAppearing();
             const float inputRowH = ImGui::GetFrameHeight();
-            const float bottomReserve = inputRowH + ImGui::GetStyle().ItemSpacing.y * 2.0f + 0.75f * chatU;
+            const float bottomReserve = inputRowH + ImGui::GetStyle().ItemSpacing.y + tune(6.0f);
             if (chatAppearing) {
                 focusChatInput = true;
                 forceChatScroll = true;
             }
-            ImGui::BeginChild("ChatScroll", ImVec2(0, -bottomReserve), !chatDockedSidebar);
+            ImGui::BeginChild("ChatScroll", ImVec2(0, -bottomReserve), false);
             ImDrawList* drawList = ImGui::GetWindowDrawList();
             const ImVec2 chatScrollScreenPos = ImGui::GetWindowPos();
             const ImVec2 chatScrollSize = ImGui::GetWindowSize();
@@ -1068,15 +1065,60 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
             auto failedStatusColor = []() {
                 return ImVec4(0.95f, 0.34f, 0.28f, 1.0f);
             };
-            int chatLineIndex = 0;
-            for (auto& line : app.chat) {
-                ImGui::PushID(chatLineIndex++);
+            const auto roundPixel = [](float v) { return std::floor(v + 0.5f); };
+            const auto isSystemLine = [](const ChatLine& l) {
+                return l.kind == ChatLineKind::System || l.who == "System";
+            };
+            const int chatN = static_cast<int>(app.chat.size());
+            // Group consecutive messages from the same sender (a system line breaks a
+            // group). Group start -> show the peer's name; group end -> draw the tail.
+            std::vector<char> groupStartFlag(static_cast<size_t>(chatN), 1);
+            std::vector<char> groupEndFlag(static_cast<size_t>(chatN), 1);
+            for (int gi = 0; gi < chatN; ++gi) {
+                if (isSystemLine(app.chat[static_cast<size_t>(gi)]))
+                    continue;
+                const std::string& who = app.chat[static_cast<size_t>(gi)].who;
+                if (gi > 0) {
+                    const ChatLine& prv = app.chat[static_cast<size_t>(gi - 1)];
+                    if (!isSystemLine(prv) && prv.who == who)
+                        groupStartFlag[static_cast<size_t>(gi)] = 0;
+                }
+                if (gi + 1 < chatN) {
+                    const ChatLine& nxt = app.chat[static_cast<size_t>(gi + 1)];
+                    if (!isSystemLine(nxt) && nxt.who == who)
+                        groupEndFlag[static_cast<size_t>(gi)] = 0;
+                }
+            }
+            const float intraSpacing = roundPixel(bubbleSpacing * 0.45f);
+            const float groupSpacing = roundPixel(bubbleSpacing * 1.6f);
+            const float nameLineH = ImGui::GetTextLineHeight();
+            const float nameGapH = nameLineH + roundPixel(chatU * 0.15f);
+            const float nameIndent = roundPixel(chatU * 0.5f);
+            const auto bubbleCorners = [](bool mine, bool atEnd) -> ImDrawFlags {
+                if (!atEnd)
+                    return ImDrawFlags_RoundCornersAll;
+                return mine ? (ImDrawFlags_RoundCornersAll & ~ImDrawFlags_RoundCornersBottomRight)
+                            : (ImDrawFlags_RoundCornersAll & ~ImDrawFlags_RoundCornersBottomLeft);
+            };
+            for (int i = 0; i < chatN; ++i) {
+                ChatLine& line = app.chat[static_cast<size_t>(i)];
+                ImGui::PushID(i);
                 const bool isMine = (line.who == "You") ||
                                     (app.nickname[0] != '\0' && line.who == app.nickname);
-                const bool isSystem = line.kind == ChatLineKind::System || line.who == "System";
+                const bool isSystem = isSystemLine(line);
                 const bool isFile = line.kind == ChatLineKind::File || !line.fileName.empty() || !line.filePath.empty();
-                const auto roundPixel = [](float v) { return std::floor(v + 0.5f); };
+                const bool groupStart = groupStartFlag[static_cast<size_t>(i)] != 0;
+                const bool groupEnd = groupEndFlag[static_cast<size_t>(i)] != 0;
+                const float endSpacing = groupEnd ? groupSpacing : intraSpacing;
+                const bool showName = !isMine && !isSystem && groupStart && !line.who.empty();
                 const ImVec2 startPos = ImGui::GetCursorPos();
+                float headerH = 0.0f;
+                if (showName) {
+                    const ImVec2 nameScreen = ImGui::GetCursorScreenPos();
+                    drawList->AddText(ImVec2(roundPixel(nameScreen.x + nameIndent), roundPixel(nameScreen.y)),
+                                      ImGui::GetColorU32(ImGuiCol_TextDisabled), line.who.c_str());
+                    headerH = nameGapH;
+                }
 
                 if (isSystem) {
                     const std::string label = line.text.empty() ? line.who : line.text;
@@ -1096,7 +1138,7 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
                                             chipSize.y * 0.5f);
                     drawList->AddText(ImVec2(chipScreen.x + chipPad.x, chipScreen.y + chipPad.y),
                                       ImGui::GetColorU32(ImGuiCol_TextDisabled), label.c_str());
-                    ImGui::SetCursorPos(ImVec2(startPos.x, roundPixel(startPos.y + chipSize.y + bubbleSpacing)));
+                    ImGui::SetCursorPos(ImVec2(startPos.x, roundPixel(startPos.y + chipSize.y + endSpacing)));
                     ImGui::PopID();
                     continue;
                 }
@@ -1110,7 +1152,7 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
                     const float cardW = std::min(contentW, std::max(170.0f, contentW * 0.76f));
                     const float cardH = std::max(58.0f, ImGui::GetFrameHeight() * 2.15f);
                     const float cardX = isMine ? std::max(0.0f, contentW - cardW) : 0.0f;
-                    ImGui::SetCursorPos(ImVec2(startPos.x + cardX, startPos.y));
+                    ImGui::SetCursorPos(ImVec2(startPos.x + cardX, startPos.y + headerH));
                     const ImVec2 cardMin = ImGui::GetCursorScreenPos();
                     const ImVec2 cardSize(cardW, cardH);
                     ImGui::InvisibleButton("FileCardHit", cardSize);
@@ -1123,10 +1165,11 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
                     drawList->AddRectFilled(cardMin,
                                             ImVec2(cardMin.x + cardSize.x, cardMin.y + cardSize.y),
                                             ImGui::ColorConvertFloat4ToU32(cardCol),
-                                            bubbleRounding);
+                                            bubbleRounding, bubbleCorners(isMine, groupEnd));
                     drawList->AddRect(cardMin,
                                       ImVec2(cardMin.x + cardSize.x, cardMin.y + cardSize.y),
-                                      ImGui::GetColorU32(ImGuiCol_Border), bubbleRounding);
+                                      ImGui::GetColorU32(ImGuiCol_Border), bubbleRounding,
+                                      bubbleCorners(isMine, groupEnd));
 
                     const ImVec2 innerPad(chatU * 0.75f, chatU * 0.55f);
                     const float innerX = cardMin.x + innerPad.x;
@@ -1165,11 +1208,11 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
 
                     if (cardHovered) {
                         if (canOpenFileCard)
-                            ImGui::SetTooltip("Double-click to open folder");
+                            StyledTooltip("Double-click to open folder");
                         else if (!line.time.empty())
-                            ImGui::SetTooltip("%s", line.time.c_str());
+                            StyledTooltip(line.time.c_str());
                     }
-                    ImGui::SetCursorPos(ImVec2(startPos.x, roundPixel(startPos.y + cardH + bubbleSpacing)));
+                    ImGui::SetCursorPos(ImVec2(startPos.x, roundPixel(startPos.y + headerH + cardH + endSpacing)));
                     ImGui::PopID();
                     continue;
                 }
@@ -1204,11 +1247,11 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
                 if (bubbleX < 0.0f)
                     bubbleX = 0.0f;
                 bubbleX = roundPixel(bubbleX);
-                ImVec2 bubblePos(startPos.x + bubbleX, startPos.y);
+                ImVec2 bubblePos(startPos.x + bubbleX, startPos.y + headerH);
                 bubblePos.x = roundPixel(bubblePos.x);
                 bubblePos.y = roundPixel(bubblePos.y);
                 const ImVec2 cursorScreen = ImGui::GetCursorScreenPos();
-                ImVec2 bubbleMin(cursorScreen.x + bubbleX, cursorScreen.y);
+                ImVec2 bubbleMin(cursorScreen.x + bubbleX, cursorScreen.y + headerH);
                 bubbleMin.x = roundPixel(bubbleMin.x);
                 bubbleMin.y = roundPixel(bubbleMin.y);
                 const ImVec2 bubbleMax(bubbleMin.x + bubbleSize.x, bubbleMin.y + bubbleSize.y);
@@ -1217,11 +1260,11 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
                 ImGui::InvisibleButton("ChatBubble", bubbleSize);
                 const bool bubbleHovered = ImGui::IsItemHovered();
                 if (bubbleHovered && !line.time.empty())
-                    ImGui::SetTooltip("%s", line.time.c_str());
+                    StyledTooltip(line.time.c_str());
 
                 drawList->AddRectFilled(bubbleMin, bubbleMax,
                                         ImGui::ColorConvertFloat4ToU32(bubbleCol),
-                                        bubbleRounding);
+                                        bubbleRounding, bubbleCorners(isMine, groupEnd));
 
                 const ImVec2 textMin(roundPixel(bubbleMin.x + bubblePad.x),
                                      roundPixel(bubbleMin.y + bubblePad.y));
@@ -1240,7 +1283,7 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
                     ImGui::PopTextWrapPos();
                 }
 
-                float nextY = roundPixel(startPos.y + bubbleSize.y + bubbleSpacing);
+                float nextY = roundPixel(startPos.y + headerH + bubbleSize.y + endSpacing);
                 if (isMine && line.status == ChatLineStatus::Failed) {
                     const char* statusText = chatStatusText(line.status);
                     if (statusText[0] != '\0') {

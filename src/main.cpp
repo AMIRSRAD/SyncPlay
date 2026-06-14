@@ -382,6 +382,22 @@ bool RenderChatTextTexture(const std::wstring& text, float wrapWidth, float font
     if (FAILED(wicBitmap->CopyPixels(&rect, stride, imageBytes, pixels.data())))
         return false;
 
+    // D2D renders with premultiplied alpha, but ImGui's DX11 blend state expects
+    // straight (non-premultiplied) alpha (SrcBlend=SRC_ALPHA, DestBlend=INV_SRC_ALPHA).
+    // Uploading premultiplied data multiplies the colour by alpha a second time at
+    // blend time, which darkens the antialiased glyph edges and makes the text look
+    // jagged/fringed. Convert back to straight alpha so the edges blend cleanly.
+    for (size_t i = 0; i + 3 < pixels.size(); i += 4) {
+        const uint32_t a = pixels[i + 3];
+        if (a == 0) {
+            pixels[i + 0] = pixels[i + 1] = pixels[i + 2] = 0;
+        } else if (a < 255) {
+            pixels[i + 0] = static_cast<uint8_t>(std::min<uint32_t>(255u, (pixels[i + 0] * 255u + a / 2u) / a));
+            pixels[i + 1] = static_cast<uint8_t>(std::min<uint32_t>(255u, (pixels[i + 1] * 255u + a / 2u) / a));
+            pixels[i + 2] = static_cast<uint8_t>(std::min<uint32_t>(255u, (pixels[i + 2] * 255u + a / 2u) / a));
+        }
+    }
+
     ReleaseChatTexture(out);
     if (!CreateTextureFromBGRA(pixels.data(), width, height, &out.srv))
         return false;
@@ -810,35 +826,46 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     ImVec4* colors = style.Colors;
     const ImVec4 bg = ImVec4(0.05f, 0.05f, 0.05f, 1.00f);
     const ImVec4 panel = ImVec4(0.11f, 0.11f, 0.11f, 0.88f);
-    const ImVec4 panelSoft = ImVec4(0.15f, 0.15f, 0.15f, 0.94f);
-    const ImVec4 panelHover = ImVec4(0.20f, 0.20f, 0.20f, 0.98f);
     const ImVec4 accent = ImVec4(0.40f, 0.58f, 0.98f, 1.00f);
-    const ImVec4 accentSoft = ImVec4(0.80f, 0.82f, 0.85f, 0.70f);
-    const ImVec4 text = ImVec4(0.93f, 0.93f, 0.93f, 1.00f);
-    const ImVec4 mutedColor = ImVec4(0.65f, 0.65f, 0.65f, 1.00f);
-    const ImVec4 border = ImVec4(0.18f, 0.18f, 0.18f, 0.45f);
+    const ImVec4 accentSoft = ImVec4(0.40f, 0.58f, 0.98f, 0.70f);
+    const ImVec4 text = ImVec4(0.94f, 0.95f, 0.97f, 1.00f);
+    const ImVec4 mutedColor = ImVec4(0.66f, 0.69f, 0.74f, 1.00f);
+
+    // Glass control palette: translucent fills that read well over the frosted
+    // panels (and over the solid bars). Dark fills for editable fields (so text
+    // keeps contrast over a bright blur); light fills for buttons/headers.
+    const ImVec4 glassBorder       = ImVec4(1.0f, 1.0f, 1.0f, 0.12f);
+    const ImVec4 glassSeparator    = ImVec4(1.0f, 1.0f, 1.0f, 0.09f);
+    const ImVec4 glassField        = ImVec4(0.0f, 0.0f, 0.0f, 0.24f);
+    const ImVec4 glassFieldHover   = ImVec4(0.0f, 0.0f, 0.0f, 0.32f);
+    const ImVec4 glassFieldActive  = ImVec4(0.0f, 0.0f, 0.0f, 0.40f);
+    const ImVec4 glassButton       = ImVec4(1.0f, 1.0f, 1.0f, 0.09f);
+    const ImVec4 glassButtonHover  = ImVec4(1.0f, 1.0f, 1.0f, 0.16f);
+    const ImVec4 glassHeader       = ImVec4(1.0f, 1.0f, 1.0f, 0.07f);
+    const ImVec4 glassHeaderHover  = ImVec4(1.0f, 1.0f, 1.0f, 0.13f);
+    const ImVec4 glassHeaderActive = ImVec4(1.0f, 1.0f, 1.0f, 0.18f);
 
     colors[ImGuiCol_WindowBg] = panel;
     colors[ImGuiCol_ChildBg] = panel;
-    colors[ImGuiCol_PopupBg] = panelSoft;
-    colors[ImGuiCol_Border] = border;
-    colors[ImGuiCol_FrameBg] = panelSoft;
-    colors[ImGuiCol_FrameBgHovered] = panelHover;
-    colors[ImGuiCol_FrameBgActive] = panelHover;
+    colors[ImGuiCol_PopupBg] = ImVec4(0.10f, 0.10f, 0.12f, 0.975f);
+    colors[ImGuiCol_Border] = glassBorder;
+    colors[ImGuiCol_FrameBg] = glassField;
+    colors[ImGuiCol_FrameBgHovered] = glassFieldHover;
+    colors[ImGuiCol_FrameBgActive] = glassFieldActive;
     colors[ImGuiCol_TitleBg] = panel;
     colors[ImGuiCol_TitleBgActive] = panel;
-    colors[ImGuiCol_Button] = panelSoft;
-    colors[ImGuiCol_ButtonHovered] = panelHover;
-    colors[ImGuiCol_ButtonActive] = panelHover;
+    colors[ImGuiCol_Button] = glassButton;
+    colors[ImGuiCol_ButtonHovered] = glassButtonHover;
+    colors[ImGuiCol_ButtonActive] = accentSoft;
     colors[ImGuiCol_CheckMark] = accent;
     colors[ImGuiCol_SliderGrab] = accentSoft;
     colors[ImGuiCol_SliderGrabActive] = accent;
-    colors[ImGuiCol_Header] = panelSoft;
-    colors[ImGuiCol_HeaderHovered] = panelHover;
-    colors[ImGuiCol_HeaderActive] = panelHover;
+    colors[ImGuiCol_Header] = glassHeader;
+    colors[ImGuiCol_HeaderHovered] = glassHeaderHover;
+    colors[ImGuiCol_HeaderActive] = glassHeaderActive;
     colors[ImGuiCol_Text] = text;
     colors[ImGuiCol_TextDisabled] = mutedColor;
-    colors[ImGuiCol_Separator] = border;
+    colors[ImGuiCol_Separator] = glassSeparator;
     colors[ImGuiCol_SeparatorHovered] = accentSoft;
     colors[ImGuiCol_SeparatorActive] = accent;
 
@@ -1102,6 +1129,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         colors[ImGuiCol_CheckMark] = accentColor;
         colors[ImGuiCol_SliderGrab] = accentSoft;
         colors[ImGuiCol_SliderGrabActive] = accentColor;
+        colors[ImGuiCol_ButtonActive] = accentSoft;
         colors[ImGuiCol_SeparatorHovered] = accentSoft;
         colors[ImGuiCol_SeparatorActive] = accentColor;
         colors[ImGuiCol_Tab] = tabBase;
@@ -1725,6 +1753,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             renderState.frameRequested.store(true, std::memory_order_relaxed);
             renderState.cv.notify_one();
         }
+        // Frosted-glass toggle: when off, skip the per-frame blur downsample (CPU)
+        // and drop the frosted backdrop immediately, even while paused.
+        g_glassEnabled = app.glassPanels;
+        if (!g_glassEnabled)
+            g_blurReady = false;
         static uint64_t lastUploaded = 0;
         const uint64_t frameId = renderState.frameCounter.load(std::memory_order_relaxed);
         if (frameId != lastUploaded) {
@@ -2211,7 +2244,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             ctrlGrad.x = std::min(1.0f, ctrlGrad.x + 0.04f);
             ctrlGrad.y = std::min(1.0f, ctrlGrad.y + 0.04f);
             ctrlGrad.z = std::min(1.0f, ctrlGrad.z + 0.05f);
-            const float controlsY = static_cast<float>(ui_h) - barHeightUi;
+            const float controlsY = g_fullscreen
+                                        ? (static_cast<float>(ui_h) - barHeightUi)
+                                        : std::floor(static_cast<float>(ui_h) - barHeightUi);
+            // Windowed: extend the bar a hair past the client bottom (the Surface clips
+            // the overshoot) so integer pixel rounding never leaves a dark clear-colour
+            // strip between the bar and the window's bottom edge.
+            const float controlsH = g_fullscreen
+                                        ? barHeightUi
+                                        : (static_cast<float>(ui_h) - controlsY + 1.0f);
             const float compactMinW = tune(640.0f);
             const float compactTargetW = std::min(viewW, std::max(compactMinW, viewW * 0.60f));
             const float controlsW = (g_fullscreen ? compactTargetW : viewW);
@@ -2239,13 +2280,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, controlsSpacing);
             ImGui::PushStyleVar(ImGuiStyleVar_Alpha, bottomFade);
             // Windowed bar is flush to the window's rounded corners — square its own
-            // corners so they meet the window rounding with no gap. border stays true
-            // so content insets/spacing are unchanged (no underlapping).
+            // corners so they meet the window rounding with no gap. Border is OFF: with
+            // the bar flush to the window edges it showed as a hard white line on the
+            // left/right/bottom. AlwaysUseWindowPadding keeps the content insets that a
+            // borderless child would otherwise drop (so the timeline doesn't underlap).
             const float savedControlsRounding = ImGui::GetStyle().ChildRounding;
             if (!g_fullscreen)
                 ImGui::GetStyle().ChildRounding = 0.0f;
-            ImGui::BeginChild("Controls", ImVec2(controlsW, barHeightUi), true,
-                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            ImGui::BeginChild("Controls", ImVec2(controlsW, controlsH), false,
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                              ImGuiWindowFlags_AlwaysUseWindowPadding);
             ImGui::GetStyle().ChildRounding = savedControlsRounding;
 
         const float bottomRowOffset = 3.0f;
@@ -3230,31 +3274,38 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         ImGui::PopStyleVar(4);
 
         if (!app.events.empty()) {
-            const float lineH = ImGui::GetTextLineHeightWithSpacing();
-            const ImVec2 toastPad(std::max(tune(4.0f), basePad.x * 0.5f),
-                                  std::max(tune(3.0f), basePad.y * 0.5f));
+            // Toast: symmetric padding with each line centred both axes. Size off the
+            // glyph height (not line-with-spacing) and place lines at explicit y so
+            // there's no stray trailing gap that would push the text upward.
+            const float lineH = ImGui::GetTextLineHeight();
+            const float gapY = ImGui::GetStyle().ItemSpacing.y;
+            const ImVec2 toastPad(tune(16.0f), tune(11.0f));
             float maxToastW = 0.0f;
             for (const auto& e : app.events)
                 maxToastW = std::max(maxToastW, ImGui::CalcTextSize(e.text.c_str()).x);
-            const float toastW = std::max(tune(60.0f), maxToastW + toastPad.x * 2.0f);
-            const float toastH = toastPad.y * 2.0f + lineH * static_cast<float>(app.events.size());
+            const int toastN = static_cast<int>(app.events.size());
+            const float toastW = maxToastW + toastPad.x * 2.0f;
+            const float toastH = toastPad.y * 2.0f + lineH * toastN + gapY * (toastN - 1);
             ImVec4 toastBg = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
-            toastBg.w = 0.65f;
-            ImGui::SetCursorPos(ImVec2(20.0f, 60.0f));
+            toastBg.w = 0.85f;
+            ImGui::SetCursorPos(ImVec2(tune(20.0f), tune(60.0f)));
             ImGui::PushStyleColor(ImGuiCol_ChildBg, toastBg);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, toastPad);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, tune(10.0f));
             ImGui::BeginChild("Toasts", ImVec2(toastW, toastH), true,
                               ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-            const float contentW = ImGui::GetContentRegionAvail().x;
+            const float availW = ImGui::GetContentRegionAvail().x;
+            const float startY = ImGui::GetCursorPosY();
+            int toastIdx = 0;
             for (auto& e : app.events) {
-                const float lineStartX = ImGui::GetCursorPosX();
                 const float textW = ImGui::CalcTextSize(e.text.c_str()).x;
-                const float offsetX = std::max(0.0f, (contentW - textW) * 0.5f);
-                ImGui::SetCursorPosX(lineStartX + offsetX);
+                ImGui::SetCursorPos(ImVec2(toastPad.x + std::max(0.0f, (availW - textW) * 0.5f),
+                                           startY + toastIdx * (lineH + gapY)));
                 ImGui::TextUnformatted(e.text.c_str());
+                ++toastIdx;
             }
             ImGui::EndChild();
-            ImGui::PopStyleVar();
+            ImGui::PopStyleVar(2);
             ImGui::PopStyleColor();
             for (auto& e : app.events)
                 e.ttl -= ImGui::GetIO().DeltaTime;
@@ -3312,6 +3363,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     }
 
     CleanupVideoTexture();
+    CleanupBlurTexture();
     CleanupDeviceD3D();
     DestroyWindow(g_hWnd);
     UnregisterClass(wc.lpszClassName, wc.hInstance);
