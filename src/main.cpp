@@ -2071,6 +2071,21 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         bottomAlpha = smoothStep(bottomAlpha, bottomTarget, 0.06f, 0.025f);
         dockAlpha = smoothStep(dockAlpha, dockTarget, 0.05f, 0.02f);
 
+        // Eased accent: glide the live theme accent toward the user's chosen colour
+        // instead of snapping, so changes in Settings (and Reset) animate.
+        static float curAccent[3] = { app.accentColor[0], app.accentColor[1], app.accentColor[2] };
+        {
+            const float ease = 1.0f - std::exp(-dt / 0.14f);
+            bool changed = false;
+            for (int i = 0; i < 3; ++i) {
+                const float d = app.accentColor[i] - curAccent[i];
+                if (std::fabs(d) > 0.0008f) { curAccent[i] += d * ease; changed = true; }
+                else { curAccent[i] = app.accentColor[i]; }
+            }
+            if (changed)
+                applyAccent(curAccent);
+        }
+
         const bool renderTopBar = topAlpha > 0.01f;
         const bool renderBottomBar = bottomAlpha > 0.01f;
         const bool renderDock = dockAlpha > 0.01f;

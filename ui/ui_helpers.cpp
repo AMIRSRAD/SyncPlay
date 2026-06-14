@@ -2,10 +2,25 @@
 
 #include <imgui_internal.h>
 
+#include <cmath>
+#include <unordered_map>
 #include <vector>
 
 namespace {
 std::vector<ImVec2> g_glowOffsetStack;
+
+// Eased press-scale for icon buttons: the icon shrinks slightly while held and
+// springs back on release. Keyed by the button's ImGui id.
+float IconPressScale(ImGuiID id, bool held) {
+    static std::unordered_map<ImGuiID, float> s_scale;
+    auto it = s_scale.find(id);
+    float v = (it == s_scale.end()) ? 1.0f : it->second;
+    const float target = held ? 0.86f : 1.0f;
+    const float dt = ImGui::GetIO().DeltaTime;
+    v += (target - v) * (1.0f - std::exp(-dt / 0.05f));
+    s_scale[id] = v;
+    return v;
+}
 
 ImVec2 CurrentGlowOffset() {
     if (g_glowOffsetStack.empty())
@@ -106,7 +121,10 @@ bool IconButton(const char* id, const char* icon, const char* tooltip,
     ImGui::PushStyleColor(ImGuiCol_Button, transparent);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, transparent);
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, transparent);
+    const ImGuiID btnId = ImGui::GetID(icon);
+    ImGui::SetWindowFontScale(IconPressScale(btnId, ImGui::GetActiveID() == btnId));
     bool pressed = ImGui::Button(icon, size);
+    ImGui::SetWindowFontScale(1.0f);
     ImGui::PopStyleColor(3);
     if (iconFont)
         ImGui::PopFont();
@@ -133,7 +151,10 @@ bool IconButtonFont(const char* id, const char* icon, const char* tooltip,
     ImGui::PushStyleColor(ImGuiCol_Button, transparent);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, transparent);
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, transparent);
+    const ImGuiID btnId = ImGui::GetID(icon);
+    ImGui::SetWindowFontScale(IconPressScale(btnId, ImGui::GetActiveID() == btnId));
     bool pressed = ImGui::Button(icon, size);
+    ImGui::SetWindowFontScale(1.0f);
     ImGui::PopStyleColor(3);
     if (font)
         ImGui::PopFont();

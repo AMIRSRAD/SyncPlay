@@ -1,10 +1,20 @@
 #include "panel_utils.h"
 
 #include <algorithm>
+#include <cmath>
+#include <unordered_map>
 
 #include "../platform/platform.h"
 
 namespace {
+// Per-panel appear animation state (slide + fade in). Keyed by the panel id; the
+// progress resets whenever the panel was not drawn on the previous frame.
+struct PanelAppear {
+    float t = 0.0f;
+    int lastFrame = -2;
+};
+std::unordered_map<ImGuiID, PanelAppear> g_panelAppear;
+
 void ClampPanel(float* pos, float* size, float minW, float minH, float maxW, float maxH,
                 float edgePad, int ui_w, int ui_h) {
     size[0] = std::clamp(size[0], minW, maxW);
@@ -97,8 +107,27 @@ static void BeginPanelImpl(const char* id, const ImVec2& pos, const ImVec2& size
                            ImGuiWindowFlags flags, float padScale) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float rounding = ImGui::GetStyle().ChildRounding;
-    const ImVec2 pMin = pos;
-    const ImVec2 pMax(pos.x + size.x, pos.y + size.y);
+
+    // Appear animation: the panel eases 0 -> 1 the moment it starts being drawn,
+    // sliding up into place while fading in. Progress resets when the panel was
+    // absent on the previous frame, so it replays each time the panel is opened.
+    const ImGuiID animKey = ImGui::GetID(id);
+    const int frame = ImGui::GetFrameCount();
+    PanelAppear& pa = g_panelAppear[animKey];
+    if (pa.lastFrame != frame - 1)
+        pa.t = 0.0f;
+    pa.lastFrame = frame;
+    const float dt = ImGui::GetIO().DeltaTime;
+    pa.t += (1.0f - pa.t) * (1.0f - std::exp(-dt / 0.10f));
+    if (pa.t > 0.999f)
+        pa.t = 1.0f;
+    const float appear = pa.t;
+    const float ef = panelFade * appear; // effective fade (panel fade * appear)
+    ImVec2 apos = pos;
+    apos.y += (1.0f - appear) * (ImGui::GetFontSize() * 0.9f);
+
+    const ImVec2 pMin = apos;
+    const ImVec2 pMax(apos.x + size.x, apos.y + size.y);
 
     // Frosted-glass backdrop: draw the blurred frame behind the panel, UV-mapped
     // to this panel's on-screen region (the Surface window is at 0,0, so panel
@@ -116,11 +145,11 @@ static void BeginPanelImpl(const char* id, const ImVec2& pos, const ImVec2& size
             const ImVec2 uvMin(pMin.x / vw, pMin.y / vh);
             const ImVec2 uvMax(pMax.x / vw, pMax.y / vh);
             dl->AddImageRounded(reinterpret_cast<ImTextureID>(g_blurSrv), pMin, pMax, uvMin, uvMax,
-                                ImGui::GetColorU32(ImVec4(1, 1, 1, panelFade)), rounding);
+                                ImGui::GetColorU32(ImVec4(1, 1, 1, ef)), rounding);
             ImVec4 tint = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
-            tint.w = 0.52f * panelFade;
+            tint.w = 0.52f * ef;
             dl->AddRectFilled(pMin, pMax, ImGui::ColorConvertFloat4ToU32(tint), rounding);
-            dl->AddRect(pMin, pMax, ImGui::GetColorU32(ImVec4(1, 1, 1, 0.10f * panelFade)),
+            dl->AddRect(pMin, pMax, ImGui::GetColorU32(ImVec4(1, 1, 1, 0.10f * ef)),
                         rounding, 0, 1.0f);
             frosted = true;
         }
@@ -129,7 +158,7 @@ static void BeginPanelImpl(const char* id, const ImVec2& pos, const ImVec2& size
     ImVec4 childBg(0.0f, 0.0f, 0.0f, 0.0f);
     if (!frosted) {
         childBg = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
-        childBg.w = alpha * panelFade;
+        childBg.w = alpha * ef;
     }
     // Generous inner padding so titles/content don't hug the panel corner.
     // Derive it from the font size (DPI-aware) rather than basePad/WindowPadding,
@@ -142,8 +171,8 @@ static void BeginPanelImpl(const char* id, const ImVec2& pos, const ImVec2& size
     panelPad.y *= padScale;
     ImGui::PushStyleColor(ImGuiCol_ChildBg, childBg);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, panelPad);
-    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, panelFade);
-    ImGui::SetCursorPos(pos);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ef);
+    ImGui::SetCursorPos(apos);
     // AlwaysUseWindowPadding: a borderless child otherwise ignores WindowPadding,
     // which made the frosted panels' content hug the top-left corner.
     ImGui::BeginChild(id, size, !frosted, flags | ImGuiWindowFlags_AlwaysUseWindowPadding);

@@ -53,7 +53,6 @@ void DrawSettingsPanel(PanelContext& ctx) {
     auto& applyVideoColor = ctx.applyVideoColor;
     auto& applyToneMapping = ctx.applyToneMapping;
     auto& applyVideoShaders = ctx.applyVideoShaders;
-    auto& applyAccent = ctx.applyAccent;
     const ImGuiIO& io = ImGui::GetIO();
 
     {
@@ -193,15 +192,14 @@ void DrawSettingsPanel(PanelContext& ctx) {
                 }
                 if (ImGui::BeginTabItem("Appearance")) {
                     ImGui::TextUnformatted("Theme");
-                    if (ImGui::ColorEdit3("Accent", app.accentColor, ImGuiColorEditFlags_DisplayRGB)) {
-                        applyAccent(app.accentColor);
+                    // Accent is applied via an eased transition in the main loop
+                    // (see curAccent), so we only update the stored colour here.
+                    if (ImGui::ColorEdit3("Accent", app.accentColor, ImGuiColorEditFlags_DisplayRGB))
                         app.dirty = true;
-                    }
                     if (ImGui::Button("Reset Accent")) {
                         app.accentColor[0] = accent.x;
                         app.accentColor[1] = accent.y;
                         app.accentColor[2] = accent.z;
-                        applyAccent(app.accentColor);
                         app.dirty = true;
                     }
                     ImGui::Separator();
