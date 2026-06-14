@@ -5,6 +5,10 @@
 /dist/
 /publish/
 
+# Installer packaging artifacts (scripts are tracked; staged binaries + output aren't)
+/packaging/stage/
+/packaging/dist/
+
 # CMake generated files
 CMakeCache.txt
 CMakeFiles/
