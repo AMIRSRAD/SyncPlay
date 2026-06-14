@@ -99,7 +99,7 @@ struct AppState {
     float voiceVolume = 70.0f;
     float voiceInputThreshold = 0.0f;
     int voiceCaptureDeviceIndex = -1;
-    float accentColor[3]{0.80f, 0.82f, 0.85f};
+    float accentColor[3]{0.40f, 0.58f, 0.98f};
 
     float videoBrightness = 0.0f;
     float videoContrast = 0.0f;
@@ -132,7 +132,7 @@ struct AppState {
 };
 
 std::filesystem::path config_path();
-void load_config(AppState& app);
+void load_config(AppState& app, float* volume = nullptr, float* speed = nullptr);
 void save_config(const AppState& app, float volume, float speed);
 
 std::string computePartialHashHexUtf8(const std::string& path);

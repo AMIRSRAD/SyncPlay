@@ -340,7 +340,6 @@ void SignalingServer::onSocketDisconnected(rtc::WebSocket* socket) {
 
     if (session->host && session->host.get() == socket) {
         session->host.reset();
-        session->pendingForHost.clear();
     }
 
     session->guests.erase(std::remove_if(session->guests.begin(), session->guests.end(),
@@ -401,17 +400,9 @@ void SignalingServer::onTextMessage(rtc::WebSocket* socket, const std::string& m
         }
 
         if (role == "host") {
-            session->pendingForHost.clear();
-            session->pendingForGuests.clear();
             if (session->host && session->host.get() != socket)
                 session->host->close();
             session->host = m_peers[socket].socket;
-            if (!session->pendingForHost.empty() && session->host) {
-                for (const auto& payload : session->pendingForHost)
-                    session->host->send(payload);
-                LogDebug("signaling") << "Flushed pending to host " << session->pendingForHost.size() << std::endl;
-                session->pendingForHost.clear();
-            }
         } else {
             bool exists = false;
             for (const auto& guest : session->guests) {

@@ -2,6 +2,7 @@
 
 #include <mpv/client.h>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 
 #include "platform/platform.h"
@@ -88,20 +89,17 @@ void render_thread(SwRenderState* state) {
 void update_video_texture(SwRenderState& state) {
     if (!g_videoTex || !g_videoSrv)
         return;
-    int w = 0;
-    int h = 0;
-    size_t stride = 0;
-    const uint8_t* src = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(state.mutex);
-        const int front = state.frontIndex;
-        if (!state.hasFrame.load(std::memory_order_relaxed) || state.buffers[front].empty())
-            return;
-        w = state.widths[front];
-        h = state.heights[front];
-        stride = state.strides[front];
-        src = state.buffers[front].data();
-    }
+    // Hold the lock for the entire upload. The render thread can swap frontIndex
+    // and reallocate the (now back) buffer at any moment, so reading the front
+    // buffer after releasing the lock would be a use-after-free / tearing race.
+    std::lock_guard<std::mutex> lock(state.mutex);
+    const int front = state.frontIndex;
+    if (!state.hasFrame.load(std::memory_order_relaxed) || state.buffers[front].empty())
+        return;
+    const int w = state.widths[front];
+    const int h = state.heights[front];
+    const size_t stride = state.strides[front];
+    const uint8_t* src = state.buffers[front].data();
     if (!src || w <= 0 || h <= 0)
         return;
     if (w != g_videoTexW || h != g_videoTexH)
@@ -109,15 +107,14 @@ void update_video_texture(SwRenderState& state) {
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (SUCCEEDED(g_pd3dDeviceContext->Map(g_videoTex, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
         uint8_t* dst = static_cast<uint8_t*>(mapped.pData);
-        const size_t rowBytes = static_cast<size_t>(w) * 4;
+        // Copy each row and force opaque alpha in a single pass. mpv writes
+        // "bgr0" (byte 3 is undefined), so OR in 0xFF000000 to set alpha = 255
+        // instead of doing a second per-pixel pass over the destination.
         for (int y = 0; y < h; ++y) {
-            std::memcpy(dst + static_cast<size_t>(y) * mapped.RowPitch,
-                        src + static_cast<size_t>(y) * stride,
-                        rowBytes);
-            uint8_t* row = dst + static_cast<size_t>(y) * mapped.RowPitch;
-            for (int x = 0; x < w; ++x) {
-                row[x * 4 + 3] = 0xFF;
-            }
+            const uint32_t* s = reinterpret_cast<const uint32_t*>(src + static_cast<size_t>(y) * stride);
+            uint32_t* d = reinterpret_cast<uint32_t*>(dst + static_cast<size_t>(y) * mapped.RowPitch);
+            for (int x = 0; x < w; ++x)
+                d[x] = s[x] | 0xFF000000u;
         }
         g_pd3dDeviceContext->Unmap(g_videoTex, 0);
     }

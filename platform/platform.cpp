@@ -52,6 +52,8 @@ DWORD g_exStylePrev = 0;
 bool g_pendingToggleFullscreen = false;
 bool g_pendingTogglePlay = false;
 bool g_pendingDrop = false;
+bool g_pendingDpiChange = false;
+unsigned int g_pendingDpiValue = 96;
 std::wstring g_dropPath;
 SwRenderState* g_renderState = nullptr;
 std::atomic<bool> g_requestExit{false};
@@ -88,7 +90,7 @@ void ToggleFullscreen(HWND hWnd) {
             SetWindowLong(hWnd, GWL_STYLE, g_stylePrev & ~WS_OVERLAPPEDWINDOW);
             SetWindowLong(hWnd, GWL_EXSTYLE, g_exStylePrev & ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE |
                                                              WS_EX_CLIENTEDGE | WS_EX_STATICEDGE));
-            SetWindowPos(hWnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+            SetWindowPos(hWnd, HWND_TOPMOST, mi.rcMonitor.left, mi.rcMonitor.top,
                          mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
                          SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
         }
@@ -104,8 +106,8 @@ void ToggleFullscreen(HWND hWnd) {
         SetWindowLong(hWnd, GWL_STYLE, g_stylePrev);
         SetWindowLong(hWnd, GWL_EXSTYLE, g_exStylePrev);
         SetWindowPlacement(hWnd, &g_wpPrev);
-        SetWindowPos(hWnd, nullptr, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+        SetWindowPos(hWnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
         g_fullscreen = false;
         ApplyCustomWindowChrome(hWnd);
         if (g_wasMaximized) {
@@ -159,6 +161,20 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
         }
         break;
+    }
+    case WM_DPICHANGED: {
+        // Window moved to a monitor with a different DPI. Resize/reposition to the
+        // OS-suggested rect and ask the app loop to rebuild fonts at the new scale.
+        const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+        if (suggested) {
+            SetWindowPos(hWnd, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left,
+                         suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        g_pendingDpiValue = HIWORD(wParam);
+        g_pendingDpiChange = true;
+        return 0;
     }
     case WM_SIZE:
         if (g_pd3dDevice != nullptr && g_pSwapChain != nullptr && wParam != SIZE_MINIMIZED) {

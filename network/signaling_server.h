@@ -37,8 +37,6 @@ public:
 private:
     struct Session {
         std::shared_ptr<rtc::WebSocket> host;
-        std::vector<std::string> pendingForHost;
-        std::vector<std::string> pendingForGuests;
         std::vector<std::string> codes;
         std::vector<std::shared_ptr<rtc::WebSocket>> guests;
         std::string mode;

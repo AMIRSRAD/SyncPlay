@@ -60,11 +60,6 @@ void SyncManager::applyState(const SyncState& s, bool allowImmediateSeek) {
     m_player->setSpeed(s.speed + m_speedCorrection);
 }
 
-void SyncManager::update() {
-    if (m_role == Role::Host)
-        captureState();
-}
-
 void SyncManager::setRole(Role role) {
     m_role = role;
 }

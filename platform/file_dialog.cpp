@@ -128,8 +128,10 @@ std::wstring openFileDialog(HWND owner, const wchar_t* filter, const wchar_t* ti
                 dlg->Advise(events, &cookie);
             if (title && *title)
                 dlg->SetTitle(title);
+            // Parse every filter string first, THEN take c_str() pointers:
+            // growing `owned` after capturing a pointer would dangle it on a
+            // vector reallocation.
             std::vector<std::wstring> owned;
-            std::vector<COMDLG_FILTERSPEC> specs;
             if (filter) {
                 const wchar_t* p = filter;
                 while (*p) {
@@ -141,11 +143,15 @@ std::wstring openFileDialog(HWND owner, const wchar_t* filter, const wchar_t* ti
                     p += wcslen(p) + 1;
                     owned.emplace_back(name);
                     owned.emplace_back(pattern);
-                    COMDLG_FILTERSPEC spec{};
-                    spec.pszName = owned[owned.size() - 2].c_str();
-                    spec.pszSpec = owned[owned.size() - 1].c_str();
-                    specs.push_back(spec);
                 }
+            }
+            std::vector<COMDLG_FILTERSPEC> specs;
+            specs.reserve(owned.size() / 2);
+            for (size_t i = 0; i + 1 < owned.size(); i += 2) {
+                COMDLG_FILTERSPEC spec{};
+                spec.pszName = owned[i].c_str();
+                spec.pszSpec = owned[i + 1].c_str();
+                specs.push_back(spec);
             }
             if (!specs.empty())
                 dlg->SetFileTypes(static_cast<UINT>(specs.size()), specs.data());

@@ -43,6 +43,34 @@ std::filesystem::path downloadsDir() {
         return std::filesystem::path(home);
     return std::filesystem::current_path();
 }
+
+// Reduce a peer-supplied file name to a bare, safe filename so an incoming share
+// can never escape the Downloads directory via ".." traversal, path separators,
+// or an absolute/drive-qualified path. Never trust the name off the wire.
+std::string sanitizeShareFileName(const std::string& raw) {
+    std::string name = Trim(raw);
+    const size_t sep = name.find_last_of("/\\");
+    if (sep != std::string::npos)
+        name = name.substr(sep + 1);
+    if (name.size() >= 2 && name[1] == ':')  // strip a leftover drive prefix like "C:"
+        name = name.substr(2);
+    name = Trim(name);
+    if (name == "." || name == "..")
+        return {};
+    std::string out;
+    out.reserve(name.size());
+    for (char c : name) {
+        const unsigned char uc = static_cast<unsigned char>(c);
+        if (uc < 0x20 || c == '/' || c == '\\' || c == ':' || c == '*' ||
+            c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
+            out.push_back('_');
+        else
+            out.push_back(c);
+    }
+    while (!out.empty() && (out.back() == '.' || out.back() == ' '))  // Windows strips these
+        out.pop_back();
+    return out;
+}
 }
 
 SyncSession::SyncSession(PlaybackController* player)
@@ -1029,7 +1057,7 @@ std::filesystem::path SyncSession::resolveSharePath(const std::string& name) con
     std::filesystem::path baseDir = downloadsDir();
     if (baseDir.empty())
         return {};
-    std::string safeName = Trim(name);
+    std::string safeName = sanitizeShareFileName(name);
     if (safeName.empty())
         safeName = "shared-file";
     std::filesystem::path candidate = baseDir / safeName;

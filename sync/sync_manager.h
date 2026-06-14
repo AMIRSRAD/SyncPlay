@@ -8,7 +8,6 @@ public:
 
     SyncManager(PlaybackController* player, Role role);
 
-    void update();
     SyncState captureState() const;
     void applyState(const SyncState& state, bool allowImmediateSeek = false);
     void setRole(Role role);

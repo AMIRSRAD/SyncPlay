@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include "../core/sha1.h"
+#include "../core/utf.h"
 
 using nlohmann::json;
 
@@ -57,7 +58,7 @@ static void get_str_array(const json& j, const char* key, std::vector<std::strin
     }
 }
 
-void load_config(AppState& app) {
+void load_config(AppState& app, float* volume, float* speed) {
     const auto path = config_path();
     if (!std::filesystem::exists(path))
         return;
@@ -128,6 +129,10 @@ void load_config(AppState& app) {
     app.videoToneMappingParam = j.value("videoToneMappingParam", app.videoToneMappingParam);
     app.videoTargetPeak = j.value("videoTargetPeak", app.videoTargetPeak);
     get_str_array(j, "videoShaders", app.videoShaders);
+    if (volume)
+        *volume = j.value("volume", *volume);
+    if (speed)
+        *speed = j.value("speed", *speed);
 }
 
 void save_config(const AppState& app, float volume, float speed) {
@@ -200,7 +205,13 @@ void save_config(const AppState& app, float volume, float speed) {
 }
 
 std::string computePartialHashHexUtf8(const std::string& path) {
+#ifdef _WIN32
+    // Open via a wide path so UTF-8 (non-ASCII) media paths hash correctly;
+    // a narrow std::ifstream interprets the bytes in the active code page.
+    std::ifstream file(WideFromUtf8(path).c_str(), std::ios::binary);
+#else
     std::ifstream file(path, std::ios::binary);
+#endif
     if (!file)
         return {};
     constexpr size_t kRead = 2 * 1024 * 1024;

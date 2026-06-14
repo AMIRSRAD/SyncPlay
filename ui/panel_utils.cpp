@@ -90,8 +90,9 @@ void UpdatePanelDrag(PanelDragState& state, float* pos, float* size,
     ClampPanel(pos, size, minW, minH, maxW, maxH, edgePad, ui_w, ui_h);
 }
 
-void BeginPanel(const char* id, const ImVec2& pos, const ImVec2& size,
-                float alpha, float panelFade, const ImVec2& basePad) {
+static void BeginPanelImpl(const char* id, const ImVec2& pos, const ImVec2& size,
+                           float alpha, float panelFade, const ImVec2& basePad,
+                           ImGuiWindowFlags flags) {
     ImVec4 bg = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
     bg.w = alpha * panelFade;
     ImGui::SetCursorPos(pos);
@@ -104,25 +105,18 @@ void BeginPanel(const char* id, const ImVec2& pos, const ImVec2& size,
     ImGui::PushStyleColor(ImGuiCol_ChildBg, bg);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, basePad);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, panelFade);
-    ImGui::BeginChild(id, size, true);
+    ImGui::BeginChild(id, size, true, flags);
+}
+
+void BeginPanel(const char* id, const ImVec2& pos, const ImVec2& size,
+                float alpha, float panelFade, const ImVec2& basePad) {
+    BeginPanelImpl(id, pos, size, alpha, panelFade, basePad, ImGuiWindowFlags_None);
 }
 
 void BeginPanelNoScroll(const char* id, const ImVec2& pos, const ImVec2& size,
                         float alpha, float panelFade, const ImVec2& basePad) {
-    ImVec4 bg = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
-    bg.w = alpha * panelFade;
-    ImGui::SetCursorPos(pos);
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const float rounding = ImGui::GetStyle().ChildRounding;
-    const ImU32 shadowCol = ImGui::GetColorU32(ImVec4(0, 0, 0, 0.25f * panelFade));
-    dl->AddRectFilled(ImVec2(pos.x, pos.y + 2.0f),
-                      ImVec2(pos.x + size.x, pos.y + size.y + 2.0f),
-                      shadowCol, rounding + 2.0f);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, bg);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, basePad);
-    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, panelFade);
-    ImGui::BeginChild(id, size, true,
-                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    BeginPanelImpl(id, pos, size, alpha, panelFade, basePad,
+                   ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 }
 
 void EndPanel() {

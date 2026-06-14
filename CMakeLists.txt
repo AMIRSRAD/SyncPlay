@@ -25,6 +25,7 @@ if (WIN32)
             ui/app_state.cpp
             ui/ui_helpers.cpp
             ui/panel_utils.cpp
+            ui/panels.cpp
             platform/file_dialog.cpp
             core/utf.cpp
             sync/sync_session.cpp
