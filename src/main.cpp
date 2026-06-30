@@ -1397,6 +1397,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         ShellExecuteW(nullptr, L"open", L"explorer.exe", wide.c_str(), nullptr, SW_SHOWNORMAL);
     };
 
+    auto openUrl = [&](const std::string& url) {
+        if (url.empty())
+            return;
+        const std::wstring wide = WideFromUtf8(url);
+        ShellExecuteW(nullptr, L"open", wide.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    };
+
     auto browseShareFile = [&]() {
         const std::wstring path = openFileDialog(g_hWnd, L"All Files\0*.*\0", L"Share File");
         if (!path.empty()) {
@@ -2403,28 +2410,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         if (font18)
             ImGui::PopFont();
         ImGui::PopStyleColor();
-        if (session.sessionActive()) {
-            const std::string syncText = session.syncConfidenceText();
-            const ImVec2 syncSize = ImGui::CalcTextSize(syncText.c_str());
-            const float syncPadX = tune(8.0f);
-            const float syncPadY = tune(2.0f);
-            const float chipW = syncSize.x + syncPadX * 2.0f;
-            const float chipH = syncSize.y + syncPadY * 2.0f;
-            const float chipX = tlMin.x + (tlWidth - chipW) * 0.5f;
-            const float chipY = tlMax.y + tune(1.0f);
-            ImVec4 chipBg = ImGui::GetStyle().Colors[ImGuiCol_FrameBg];
-            chipBg.w = 0.55f * bottomFade;
-            ImVec4 syncCol = ImGui::GetStyle().Colors[ImGuiCol_TextDisabled];
-            if (syncText == "Synced" || syncText == "Sync host")
-                syncCol = ImGui::GetStyle().Colors[ImGuiCol_CheckMark];
-            else if (syncText.rfind("Resyncing", 0) == 0)
-                syncCol = ImVec4(0.97f, 0.58f, 0.35f, bottomFade);
-            syncCol.w *= bottomFade;
-            dl->AddRectFilled(ImVec2(chipX, chipY), ImVec2(chipX + chipW, chipY + chipH),
-                              ImGui::ColorConvertFloat4ToU32(chipBg), chipH * 0.5f);
-            dl->AddText(ImVec2(chipX + syncPadX, chipY + syncPadY),
-                        ImGui::ColorConvertFloat4ToU32(syncCol), syncText.c_str());
-        }
 
         ImGui::SetCursorPos(ImVec2(ImGui::GetCursorPosX(), rowY + timelineH + textH));
         if (sliderActive) {
@@ -3010,6 +2995,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             chatUnreadCount, chatSeenCount, chatInputActive,
             openFolder, browseShareFile,
             ICON_OPEN, ICON_CHAT, ICON_OVERLAY, ICON_SIDEBAR,
+            openUrl,
         };
         auto clampPanelToArea = [&](float* pos, float* size, float minW, float minH, float maxW, float maxH) {
             size[0] = std::clamp(size[0], minW, maxW);

@@ -70,6 +70,9 @@ struct PanelContext {
     std::string iconChat;
     std::string iconOverlay;
     std::string iconSidebar;
+
+    // Open a URL in the user's default browser (used by the About section).
+    std::function<void(const std::string&)> openUrl;
 };
 
 void DrawSettingsPanel(PanelContext& ctx);

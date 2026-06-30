@@ -271,6 +271,34 @@ void DrawSettingsPanel(PanelContext& ctx) {
                     ImGui::TextWrapped("Keep this off unless debugging connection or media issues.");
                     ImGui::EndTabItem();
                 }
+                if (ImGui::BeginTabItem("About")) {
+                    if (font22)
+                        ImGui::PushFont(font22);
+                    ImGui::TextUnformatted("SyncPlay");
+                    if (font22)
+                        ImGui::PopFont();
+                    ImGui::TextDisabled("Version 1.0.0");
+                    ImGui::Separator();
+                    ImGui::Spacing();
+
+                    ImGui::TextDisabled("Created by");
+                    ImGui::TextUnformatted("Amirsalar Saberi rad");
+                    ImGui::Spacing();
+
+                    ImGui::TextDisabled("Website");
+                    ImGui::PushStyleColor(ImGuiCol_TextLink, accent);
+                    if (ImGui::TextLink("https://amirsrad.ir"))
+                        ctx.openUrl("https://amirsrad.ir");
+                    ImGui::PopStyleColor();
+
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+                    ImGui::TextWrapped("\xC2\xA9 2026 Amirsalar Saberi rad. All rights reserved.");
+                    ImGui::TextWrapped("SyncPlay and all associated rights are owned by "
+                                       "Amirsalar Saberi rad.");
+                    ImGui::EndTabItem();
+                }
                 ImGui::EndTabBar();
             }
             if (ImGui::IsWindowHovered(hoverFlags))
