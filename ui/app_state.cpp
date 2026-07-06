@@ -102,6 +102,8 @@ void load_config(AppState& app, float* volume, float* speed) {
     app.subtitleDelay = j.value("subtitleDelay", app.subtitleDelay);
     app.subtitlesEnabled = j.value("subtitlesEnabled", app.subtitlesEnabled);
     get_str(j, "subtitleFont", app.subtitleFont, sizeof(app.subtitleFont));
+    get_str(j, "openSubsApiKey", app.openSubsApiKey, sizeof(app.openSubsApiKey));
+    get_str(j, "openSubsLangs", app.openSubsLangs, sizeof(app.openSubsLangs));
     app.subtitleFontSize = j.value("subtitleFontSize", app.subtitleFontSize);
     get_color3(j, "subtitleColor", app.subtitleColor);
     app.subtitleOpacity = j.value("subtitleOpacity", app.subtitleOpacity);
@@ -167,6 +169,8 @@ void save_config(const AppState& app, float volume, float speed) {
     j["subtitleDelay"] = app.subtitleDelay;
     j["subtitlesEnabled"] = app.subtitlesEnabled;
     j["subtitleFont"] = app.subtitleFont;
+    j["openSubsApiKey"] = app.openSubsApiKey;
+    j["openSubsLangs"] = app.openSubsLangs;
     j["subtitleFontSize"] = app.subtitleFontSize;
     j["subtitleColor"] = {app.subtitleColor[0], app.subtitleColor[1], app.subtitleColor[2]};
     j["subtitleOpacity"] = app.subtitleOpacity;

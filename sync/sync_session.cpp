@@ -76,8 +76,9 @@ std::string sanitizeShareFileName(const std::string& raw) {
 SyncSession::SyncSession(PlaybackController* player)
         : m_player(player),
           m_sync(player, SyncManager::Role::Host) {
-    m_signalingClient.setRelayStateCallback([this](double time, bool playing, double speed, uint64_t seq) {
-        onRelayState(time, playing, speed, seq);
+    m_signalingClient.setRelayStateCallback([this](double time, bool playing, double speed,
+                                                   uint64_t seq, double hostLatency) {
+        onRelayState(time, playing, speed, seq, hostLatency);
     });
     m_signalingClient.setRelayChatCallback([this](const std::string& message) {
         dispatchChat(message);
@@ -298,6 +299,14 @@ void SyncSession::tick() {
     if (m_shareSendActive && now >= m_nextShareSend) {
         onShareSendTick();
         m_nextShareSend = now + m_shareSendInterval;
+    }
+
+    // Keep an RTT estimate warm on both sides while a session is up; it feeds
+    // the latency compensation applied to incoming state.
+    if (m_sessionActive && m_signalingClient.isConnected() &&
+        now - m_lastPing >= m_pingInterval) {
+        m_signalingClient.sendPing();
+        m_lastPing = now;
     }
 
     if (m_hostingSession && transportConnected()) {
@@ -570,11 +579,21 @@ void SyncSession::setShareProgressCallback(ShareProgressCallback cb) {
     m_shareProgressCallback = std::move(cb);
 }
 
-void SyncSession::onRelayState(double time, bool playing, double speed, uint64_t seq) {
+void SyncSession::onRelayState(double time, bool playing, double speed, uint64_t seq,
+                               double hostLatency) {
     if (m_hostingSession)
         return;
     if (seq <= m_lastRemoteSeq)
         return;
+    // Latency compensation: the host captured `time` before the message crossed
+    // host->server->us. While playing, its playhead has already advanced by that
+    // transit time, so target the extrapolated position instead of the stale one.
+    // (Clamp: a wild latency estimate must never inject a big artificial seek.)
+    if (playing) {
+        const double transit = std::clamp(hostLatency + m_signalingClient.rttSeconds() * 0.5,
+                                          0.0, 1.0);
+        time += transit * (speed > 0.0 ? speed : 1.0);
+    }
     m_lastRemoteSeq = seq;
     m_lastRemoteTime = time;
     m_lastRemoteAt = std::chrono::steady_clock::now();
@@ -621,6 +640,12 @@ void SyncSession::onRelayPeerUpdate(bool hostOnline, int guestCount) {
 void SyncSession::onConnectionStateChanged() {
     if (m_relayVoice.active() && !voiceAvailable())
         m_relayVoice.stop();
+    // After an auto-reconnect the guests need fresh state to resync; pushing it
+    // on every host-side connect is cheap and idempotent (sendStateNow guards).
+    if (m_hostingSession && m_signalingClient.isConnected() && m_signalingClient.isJoined()) {
+        sendFileInfoIfReady();
+        sendStateNow();
+    }
     updateStatus();
 }
 
@@ -938,7 +963,8 @@ void SyncSession::sendStateNow() {
         if (!m_fileVerified || !m_relayHostOnline)
             return;
     }
-    m_signalingClient.sendRelayState(s.time, s.playing, s.speed, s.seq);
+    m_signalingClient.sendRelayState(s.time, s.playing, s.speed, s.seq,
+                                     m_signalingClient.rttSeconds() * 0.5);
 }
 
 void SyncSession::applyControlIntent(const std::string& action, double value) {

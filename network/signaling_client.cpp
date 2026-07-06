@@ -2,11 +2,19 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+
 #include "../core/base64.h"
 #include "../core/logging.h"
 #include "../core/string_utils.h"
 
 namespace {
+double SteadyNowMs() {
+    return std::chrono::duration<double, std::milli>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
 bool normalize_ws_url(const std::string& input, std::string& out) {
     std::string trimmed = Trim(input);
     if (trimmed.empty())
@@ -91,6 +99,9 @@ void SignalingClient::connectToServer(const std::string& url) {
 }
 
 void SignalingClient::disconnect() {
+    m_autoRejoin = false;
+    m_reconnectPending = false;
+    m_reconnectBackoff = std::chrono::milliseconds(1000);
     if (!m_lastUrl.empty())
         LogInfo("signaling") << "Disconnecting from " << m_lastUrl << std::endl;
     if (m_socket) {
@@ -111,6 +122,8 @@ void SignalingClient::disconnect() {
 }
 
 void SignalingClient::resetSession() {
+    m_autoRejoin = false;
+    m_reconnectPending = false;
     m_pendingOutgoing.clear();
     m_pendingJoinCode.clear();
     m_pendingJoinRole.clear();
@@ -222,16 +235,49 @@ void SignalingClient::setShareDoneCallback(ShareDoneCallback cb) {
 
 void SignalingClient::pumpEvents() {
     m_events.drain();
+    maintainReconnect();
+}
+
+void SignalingClient::maintainReconnect() {
+    if (!m_reconnectPending)
+        return;
+    if (std::chrono::steady_clock::now() < m_reconnectAt)
+        return;
+    m_reconnectPending = false;
+    if (m_lastUrl.empty() || m_sessionCode.empty() || m_role.empty())
+        return;
+    LogInfo("signaling") << "Auto-reconnect attempt to " << m_lastUrl
+                         << " as " << m_role << " " << m_sessionCode << std::endl;
+    const std::string url = m_lastUrl;
+    const std::string code = m_sessionCode;
+    const std::string role = m_role;
+    const std::string mode = m_joinMode;
+    connectToServer(url);
+    joinSession(code, role, mode);
 }
 
 void SignalingClient::onConnected() {
+    m_reconnectBackoff = std::chrono::milliseconds(1000);
+    m_reconnectPending = false;
     setConnectionState("Connected");
     sendJoinIfReady();
 }
 
 void SignalingClient::onDisconnected() {
-    setConnectionState("Disconnected");
     m_joined = false;
+    // Unexpected drop mid-session: schedule an auto-rejoin with backoff so a
+    // Wi-Fi blip doesn't end the watch party. deliberate disconnect() clears
+    // m_autoRejoin before closing, so it never reaches here armed.
+    if (m_autoRejoin && !m_sessionCode.empty() && !m_lastUrl.empty()) {
+        m_reconnectPending = true;
+        m_reconnectAt = std::chrono::steady_clock::now() + m_reconnectBackoff;
+        LogInfo("signaling") << "Scheduling reconnect in "
+                             << m_reconnectBackoff.count() << "ms" << std::endl;
+        m_reconnectBackoff = std::min(m_reconnectBackoff * 2, std::chrono::milliseconds(10000));
+        setConnectionState("Reconnecting");
+        return;
+    }
+    setConnectionState("Disconnected");
 }
 
 void SignalingClient::onTextMessage(const std::string& message) {
@@ -259,8 +305,20 @@ void SignalingClient::onTextMessage(const std::string& message) {
             bool playing = j.value("playing", false);
             double speed = j.value("speed", 1.0);
             uint64_t seq = j.value("seq", 0ULL);
+            double lat = j.value("lat", 0.0);
             if (m_relayStateCb)
-                m_relayStateCb(time, playing, speed, seq);
+                m_relayStateCb(time, playing, speed, seq, lat);
+        } else if (type == "pong") {
+            const double t0 = j.value("t", 0.0);
+            if (t0 > 0.0) {
+                const double rtt = (SteadyNowMs() - t0) / 1000.0;
+                if (rtt >= 0.0 && rtt < 5.0) {
+                    // Smooth with an EMA so one congested probe doesn't swing
+                    // the compensation.
+                    m_rttSeconds = (m_rttSeconds <= 0.0) ? rtt
+                                                         : m_rttSeconds * 0.8 + rtt * 0.2;
+                }
+            }
         } else if (type == "file") {
             long long size = j.value("size", 0LL);
             double duration = j.value("duration", 0.0);
@@ -340,10 +398,12 @@ void SignalingClient::sendJoinIfReady() {
     m_pendingJoinRole.clear();
     m_pendingJoinMode.clear();
     m_joined = true;
+    m_autoRejoin = true;
     flushPending();
 }
 
-void SignalingClient::sendRelayState(double time, bool playing, double speed, uint64_t seq) {
+void SignalingClient::sendRelayState(double time, bool playing, double speed, uint64_t seq,
+                                     double latencySeconds) {
     nlohmann::json j;
     j["type"] = "state";
     j["code"] = m_sessionCode;
@@ -351,7 +411,23 @@ void SignalingClient::sendRelayState(double time, bool playing, double speed, ui
     j["playing"] = playing;
     j["speed"] = speed;
     j["seq"] = seq;
+    // Sender's one-way latency to the relay server; receivers add their own
+    // half-RTT to estimate how stale `timestamp` is on arrival.
+    j["lat"] = latencySeconds;
     queueOrSend(j.dump());
+}
+
+void SignalingClient::sendPing() {
+    if (!m_socket || !m_socket->isOpen())
+        return; // stale pings are useless; never queue them
+    nlohmann::json j;
+    j["type"] = "ping";
+    j["t"] = SteadyNowMs();
+    m_socket->send(j.dump());
+}
+
+double SignalingClient::rttSeconds() const {
+    return m_rttSeconds;
 }
 
 void SignalingClient::sendRelayFile(int64_t size, double duration, const std::string& hash) {

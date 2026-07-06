@@ -114,10 +114,11 @@ private:
 };
 } // namespace
 
-std::wstring openFileDialog(HWND owner, const wchar_t* filter, const wchar_t* title) {
+static std::vector<std::wstring> runOpenDialog(HWND owner, const wchar_t* filter,
+                                               const wchar_t* title, bool multi) {
     HRESULT hrCo = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     const bool comOk = (hrCo == S_OK || hrCo == S_FALSE);
-    std::wstring result;
+    std::vector<std::wstring> result;
     if (comOk) {
         IFileOpenDialog* dlg = nullptr;
         HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg));
@@ -158,17 +159,27 @@ std::wstring openFileDialog(HWND owner, const wchar_t* filter, const wchar_t* ti
             DWORD opts = 0;
             dlg->GetOptions(&opts);
             opts |= FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST;
+            if (multi)
+                opts |= FOS_ALLOWMULTISELECT;
             dlg->SetOptions(opts);
             hr = dlg->Show(owner);
             if (SUCCEEDED(hr)) {
-                IShellItem* item = nullptr;
-                if (SUCCEEDED(dlg->GetResult(&item)) && item) {
-                    PWSTR path = nullptr;
-                    if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
-                        result = path;
-                        CoTaskMemFree(path);
+                IShellItemArray* items = nullptr;
+                if (SUCCEEDED(dlg->GetResults(&items)) && items) {
+                    DWORD count = 0;
+                    items->GetCount(&count);
+                    for (DWORD i = 0; i < count; ++i) {
+                        IShellItem* item = nullptr;
+                        if (SUCCEEDED(items->GetItemAt(i, &item)) && item) {
+                            PWSTR path = nullptr;
+                            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+                                result.emplace_back(path);
+                                CoTaskMemFree(path);
+                            }
+                            item->Release();
+                        }
                     }
-                    item->Release();
+                    items->Release();
                 }
             }
             if (cookie != 0)
@@ -181,4 +192,14 @@ std::wstring openFileDialog(HWND owner, const wchar_t* filter, const wchar_t* ti
             CoUninitialize();
     }
     return result;
+}
+
+std::wstring openFileDialog(HWND owner, const wchar_t* filter, const wchar_t* title) {
+    const auto paths = runOpenDialog(owner, filter, title, false);
+    return paths.empty() ? std::wstring() : paths.front();
+}
+
+std::vector<std::wstring> openFileDialogMulti(HWND owner, const wchar_t* filter,
+                                              const wchar_t* title) {
+    return runOpenDialog(owner, filter, title, true);
 }

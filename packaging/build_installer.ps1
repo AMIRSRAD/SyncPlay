@@ -8,18 +8,29 @@
 #   pwsh packaging\build_installer.ps1 [-Version 1.0.0] [-SkipBuild]
 
 param(
-    [string]$Version = "1.0.0",
+    [string]$Version = "",
     [switch]$SkipBuild
 )
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
+
+# Default the version to the one declared in CMakeLists.txt (single source of truth).
+if (-not $Version) {
+    $projLine = Select-String -Path (Join-Path $repo "CMakeLists.txt") -Pattern 'project\(SyncPlay VERSION ([0-9.]+)'
+    if ($projLine) { $Version = $projLine.Matches[0].Groups[1].Value }
+    if (-not $Version) { throw "Could not parse version from CMakeLists.txt; pass -Version explicitly." }
+    Write-Host "==> Version from CMakeLists.txt: $Version" -ForegroundColor DarkGray
+}
 $buildDir = Join-Path $repo "cmake-build-release"
 $stage = Join-Path $PSScriptRoot "stage"
 $dist = Join-Path $PSScriptRoot "dist"
 
 # --- toolchain (refreshes PATH, imports vcvars64, sets VCToolsRedistDir) ---
-. C:\packages\build-setup.ps1 | Out-Null
+# Local dev box helper; CI enters with the MSVC environment already configured.
+if (Test-Path C:\packages\build-setup.ps1) {
+    . C:\packages\build-setup.ps1 | Out-Null
+}
 
 # --- 1. build ---
 if (-not $SkipBuild) {
@@ -70,6 +81,10 @@ $iscc = @(
     "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
     "C:\Program Files\Inno Setup 6\ISCC.exe"
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $iscc) {
+    $cmd = Get-Command iscc -ErrorAction SilentlyContinue
+    if ($cmd) { $iscc = $cmd.Source }
+}
 if (-not $iscc) { throw "ISCC.exe (Inno Setup) not found. Install with: winget install JRSoftware.InnoSetup" }
 
 if (-not (Test-Path $dist)) { New-Item -ItemType Directory -Path $dist -Force | Out-Null }

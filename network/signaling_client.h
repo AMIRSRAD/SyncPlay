@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -13,7 +14,8 @@
 class SignalingClient {
 public:
     using SimpleCallback = std::function<void()>;
-    using RelayStateCallback = std::function<void(double time, bool playing, double speed, uint64_t seq)>;
+    using RelayStateCallback = std::function<void(double time, bool playing, double speed,
+                                                  uint64_t seq, double hostLatency)>;
     using RelayFileCallback = std::function<void(int64_t size, double duration, const std::string& hash)>;
     using RelayChatCallback = std::function<void(const std::string& text)>;
     using RelayIntentCallback = std::function<void(const std::string& action, double value)>;
@@ -39,7 +41,12 @@ public:
     void sendRelayVoiceStart();
     void sendRelayVoiceStop();
     void sendRelayVoiceFrame(const std::vector<uint8_t>& data);
-    void sendRelayState(double time, bool playing, double speed, uint64_t seq);
+    void sendRelayState(double time, bool playing, double speed, uint64_t seq,
+                        double latencySeconds = 0.0);
+    // Round-trip-time probe to the relay server (echoed back as "pong").
+    void sendPing();
+    // Smoothed RTT to the relay server in seconds; 0 until the first pong.
+    double rttSeconds() const;
     void sendRelayFile(int64_t size, double duration, const std::string& hash);
     void sendRelayChat(const std::string& text);
     void sendRelayIntent(const std::string& action, double value);
@@ -76,6 +83,7 @@ private:
     void sendJoinIfReady();
     void queueOrSend(const std::string& payload);
     void flushPending();
+    void maintainReconnect();
 
     std::shared_ptr<rtc::WebSocket> m_socket;
     std::string m_connectionState;
@@ -89,6 +97,15 @@ private:
     bool m_joined = false;
     std::vector<std::string> m_pendingOutgoing;
     std::atomic<uint64_t> m_generation{0};
+
+    double m_rttSeconds = 0.0;
+
+    // Auto-rejoin: after an unexpected disconnect mid-session, reconnect with
+    // exponential backoff and re-issue the last join. Cleared by disconnect().
+    bool m_autoRejoin = false;
+    bool m_reconnectPending = false;
+    std::chrono::steady_clock::time_point m_reconnectAt{};
+    std::chrono::milliseconds m_reconnectBackoff{1000};
 
     SimpleCallback m_connectionStateCb;
     SimpleCallback m_relayVoiceStartCb;

@@ -1,0 +1,87 @@
+# Builds SyncPlay and its Windows installer on every version tag (v1.2.3) and
+# attaches the installer to a GitHub Release.
+#
+# Release flow:
+#   1. bump project(SyncPlay VERSION x.y.z) in CMakeLists.txt, commit, push
+#   2. git tag vx.y.z && git push origin vx.y.z
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-installer:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Download libmpv dev SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # mpv does not publish official Windows dev SDKs; zhongfly/mpv-winbuild
+          # provides continuously-built dev packages (same source as local dev).
+          $rel = Invoke-RestMethod "https://api.github.com/repos/zhongfly/mpv-winbuild/releases/latest" -Headers @{ "User-Agent" = "SyncPlay-CI" }
+          $asset = $rel.assets | Where-Object { $_.name -match '^mpv-dev-x86_64-\d{8}' -and $_.name -notmatch 'v3' } | Select-Object -First 1
+          if (-not $asset) { throw "No mpv-dev-x86_64 asset found in latest mpv-winbuild release" }
+          Write-Host "Downloading $($asset.name)"
+          Invoke-WebRequest $asset.browser_download_url -OutFile mpv-dev.7z
+          7z x mpv-dev.7z -ompv-dev | Out-Null
+
+          # Stage the SDK the way CMakeLists expects (MPV_ROOT/include, /bin, /lib).
+          New-Item -ItemType Directory -Force C:\packages\mpv\bin | Out-Null
+          New-Item -ItemType Directory -Force C:\packages\mpv\lib | Out-Null
+          Copy-Item mpv-dev\include C:\packages\mpv\include -Recurse
+          Copy-Item mpv-dev\libmpv-2.dll C:\packages\mpv\bin\
+
+          # Generate the MSVC import library. The shipped mpv.def has no LIBRARY
+          # directive; without "LIBRARY libmpv-2.dll" the exe would import the
+          # non-existent "mpv.dll" and fail to launch.
+          $def = Get-Content mpv-dev\mpv.def
+          @("LIBRARY libmpv-2.dll") + $def | Set-Content C:\packages\mpv\lib\mpv.def -Encoding ascii
+          lib.exe /def:C:\packages\mpv\lib\mpv.def /machine:x64 /out:C:\packages\mpv\lib\mpv.lib
+
+      - name: Configure
+        shell: pwsh
+        run: >
+          cmake -S . -B cmake-build-release -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+          -DVCPKG_TARGET_TRIPLET=x64-windows
+          -DMPV_ROOT=C:/packages/mpv
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build cmake-build-release --target SyncPlay
+
+      - name: Stage libmpv next to the exe
+        shell: pwsh
+        run: Copy-Item C:\packages\mpv\bin\libmpv-2.dll cmake-build-release\
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = "$env:GITHUB_REF_NAME".TrimStart("v")
+          powershell -ExecutionPolicy Bypass -File packaging\build_installer.ps1 -Version $version -SkipBuild
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packaging/dist/SyncPlay-Setup-*.exe
+          generate_release_notes: true

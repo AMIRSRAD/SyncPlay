@@ -3,7 +3,10 @@ if (MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 endif()
 
-project(SyncPlay LANGUAGES CXX)
+# Single source of truth for the app version: the About tab reads it via the
+# SYNCPLAY_VERSION compile definition and packaging/build_installer.ps1 parses
+# this line. Bump it here only.
+project(SyncPlay VERSION 1.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,12 +25,15 @@ if (WIN32)
             platform/platform.cpp
             render/render_sw.cpp
             media/mpv_helpers.cpp
+            media/opensubtitles.cpp
             ui/app_state.cpp
             ui/ui_helpers.cpp
             ui/panel_utils.cpp
             ui/panels.cpp
             platform/file_dialog.cpp
             core/utf.cpp
+            core/crash_dump.cpp
+            core/update_check.cpp
             sync/sync_session.cpp
             sync/sync_manager.cpp
             network/signaling_client.cpp
@@ -76,11 +82,14 @@ if (WIN32)
             iphlpapi
             dwmapi
             windowscodecs
+            dbghelp
+            winhttp
             )
 endif()
 
 if (WIN32)
-    target_compile_definitions(SyncPlay PRIVATE RTC_STATIC NOMINMAX IMGUI_USE_WCHAR32)
+    target_compile_definitions(SyncPlay PRIVATE RTC_STATIC NOMINMAX IMGUI_USE_WCHAR32
+            SYNCPLAY_VERSION="${PROJECT_VERSION}")
 endif()
 
 if (WIN32)

@@ -61,7 +61,7 @@ bool g_pendingTogglePlay = false;
 bool g_pendingDrop = false;
 bool g_pendingDpiChange = false;
 unsigned int g_pendingDpiValue = 96;
-std::wstring g_dropPath;
+std::vector<std::wstring> g_dropPaths;
 SwRenderState* g_renderState = nullptr;
 std::atomic<bool> g_requestExit{false};
 std::atomic<bool> g_inSizing{false};
@@ -279,11 +279,15 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
     case WM_DROPFILES: {
         HDROP drop = (HDROP)wParam;
-        wchar_t path[MAX_PATH] = {};
-        if (DragQueryFileW(drop, 0, path, MAX_PATH)) {
-            g_dropPath = path;
-            g_pendingDrop = true;
+        const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+        g_dropPaths.clear();
+        for (UINT i = 0; i < count; ++i) {
+            wchar_t path[MAX_PATH] = {};
+            if (DragQueryFileW(drop, i, path, MAX_PATH))
+                g_dropPaths.emplace_back(path);
         }
+        if (!g_dropPaths.empty())
+            g_pendingDrop = true;
         DragFinish(drop);
         return 0;
     }

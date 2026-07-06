@@ -8,6 +8,8 @@
 #include "ui/chat_text.h"
 #include "platform/file_dialog.h"
 #include "core/utf.h"
+#include "core/crash_dump.h"
+#include "core/update_check.h"
 #include "core/logging.h"
 
 #include <imgui.h>
@@ -697,6 +699,7 @@ private:
 };
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int) {
+    InstallCrashHandler();
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const bool comInited = (comHr == S_OK || comHr == S_FALSE);
@@ -1060,7 +1063,20 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     }
     mpv_set_option_string(mpv, "vo", "libmpv");
     mpv_set_option_string(mpv, "vid", "auto");
-    mpv_set_option_string(mpv, "hwdec", "auto-safe");
+    // auto-copy-safe: decode on the GPU (D3D11VA/DXVA2) and copy the frame back.
+    // Plain "auto-safe" picks native (zero-copy) modes that the software render
+    // API can't consume, so mpv would silently fall back to CPU decoding.
+    mpv_set_option_string(mpv, "hwdec", "auto-copy-safe");
+    // Resume where you left off: mpv's watch-later machinery persists the
+    // playback position per file (keyed by path hash). Restore only the start
+    // position — volume/speed/etc. are managed by our own config.
+    {
+        const std::filesystem::path wlDir =
+            SyncPlayLog::LogFilePath().parent_path() / "watch_later";
+        mpv_set_option_string(mpv, "watch-later-dir", wlDir.string().c_str());
+        mpv_set_option_string(mpv, "watch-later-options", "start");
+        mpv_set_option_string(mpv, "save-position-on-quit", "yes");
+    }
     mpv_set_option_string(mpv, "keep-open", "yes");
     mpv_set_option_string(mpv, "cache", "yes");
     if (mpv_initialize(mpv) < 0) {
@@ -1091,6 +1107,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     float savedVolume = 100.0f;
     float savedSpeed = 1.0f;
     load_config(app, &savedVolume, &savedSpeed);
+#ifdef SYNCPLAY_VERSION
+    StartUpdateCheck(SYNCPLAY_VERSION);
+#endif
     {
         // Restore the persisted volume/speed onto mpv so they survive restarts;
         // the main loop reads these back from mpv into its local state.
@@ -1655,12 +1674,24 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         }
 
         if (g_pendingDrop) {
-            const std::string utf8 = Utf8FromWide(g_dropPath);
-            const char* cmd[] = { "loadfile", utf8.c_str(), nullptr };
-            mpv_command(mpv, cmd);
-            setLocalFileWide(g_dropPath);
-            resetScrubState();
-            app.events.push_back({"Loaded file", 2.0f});
+            // First dropped file plays now; the rest are queued onto the playlist.
+            if (!g_dropPaths.empty()) {
+                const std::string utf8 = Utf8FromWide(g_dropPaths.front());
+                const char* cmd[] = { "loadfile", utf8.c_str(), nullptr };
+                mpv_command(mpv, cmd);
+                setLocalFileWide(g_dropPaths.front());
+                for (size_t i = 1; i < g_dropPaths.size(); ++i) {
+                    const std::string more = Utf8FromWide(g_dropPaths[i]);
+                    const char* append[] = { "loadfile", more.c_str(), "append", nullptr };
+                    mpv_command(mpv, append);
+                }
+                resetScrubState();
+                if (g_dropPaths.size() > 1)
+                    app.events.push_back({"Queued " + std::to_string(g_dropPaths.size()) + " files", 2.0f});
+                else
+                    app.events.push_back({"Loaded file", 2.0f});
+                g_dropPaths.clear();
+            }
             g_pendingDrop = false;
         }
 
@@ -1672,12 +1703,42 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
                 resetScrubState();
                 updateLocalFileFromMpv();
                 applySubtitleStyle(false);
+                // watch-later restored a saved position; let the user know.
+                const double resumedAt = mpv_get_double(mpv, "time-pos", 0.0);
+                if (resumedAt > 5.0)
+                    app.events.push_back({"Resumed from " + format_time(resumedAt), 2.5f});
             }
         }
 
         paused = mpv_get_flag(mpv, "pause", paused);
         const double duration = mpv_get_double(mpv, "duration", 0.0);
         double position = mpv_get_double(mpv, "time-pos", 0.0);
+
+        // Surface the background update-check result once, as a toast.
+        {
+            static bool updateToastShown = false;
+            if (!updateToastShown) {
+                const std::string latest = UpdateAvailableVersion();
+                if (!latest.empty()) {
+                    app.events.push_back({"Update available: " + latest, 5.0f});
+                    updateToastShown = true;
+                }
+            }
+        }
+
+        // Persist the watch-later position every few seconds while media is
+        // loaded, so resume survives crashes and mid-session file switches (not
+        // just clean quits).
+        {
+            static auto lastWatchLater = std::chrono::steady_clock::now();
+            const auto nowWl = std::chrono::steady_clock::now();
+            if (duration > 0.01 && position > 5.0 &&
+                std::chrono::duration_cast<std::chrono::seconds>(nowWl - lastWatchLater).count() >= 5) {
+                const char* wlCmd[] = {"write-watch-later-config", nullptr};
+                mpv_command_async(mpv, 0, wlCmd);
+                lastWatchLater = nowWl;
+            }
+        }
         volume = static_cast<float>(mpv_get_double(mpv, "volume", volume));
         speed = static_cast<float>(mpv_get_double(mpv, "speed", speed));
         playlistCount = mpv_get_int64(mpv, "playlist-count", playlistCount);
@@ -2548,23 +2609,28 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
                 if (ImGui::IsWindowAppearing())
                     playlistSelection = static_cast<int>(playlistPos);
                 if (ImGui::Button("Add")) {
-                    const std::wstring path = openFileDialog(
+                    const std::vector<std::wstring> paths = openFileDialogMulti(
                         g_hWnd,
                         L"Video Files\0*.mp4;*.mkv;*.avi;*.mov;*.webm\0All Files\0*.*\0",
                         L"Add to Playlist");
-                    if (!path.empty()) {
+                    bool firstLoadsNow = playlistCount <= 0;
+                    for (const std::wstring& path : paths) {
                         const std::string utf8 = Utf8FromWide(path);
-                        if (playlistCount <= 0) {
+                        if (firstLoadsNow) {
                             const char* cmd[] = { "loadfile", utf8.c_str(), nullptr };
                             mpv_command(mpv, cmd);
                             setLocalFileWide(path);
                             resetScrubState();
+                            firstLoadsNow = false;
                         } else {
                             const char* cmd[] = { "loadfile", utf8.c_str(), "append", nullptr };
                             mpv_command(mpv, cmd);
                         }
-                        app.events.push_back({"Added to playlist", 1.5f});
                     }
+                    if (paths.size() > 1)
+                        app.events.push_back({"Added " + std::to_string(paths.size()) + " to playlist", 1.5f});
+                    else if (!paths.empty())
+                        app.events.push_back({"Added to playlist", 1.5f});
                 }
                 ImGui::SameLine();
                 const bool canRemove = playlistSelection >= 0 &&
@@ -3109,8 +3175,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         const bool hasTextFocus = io.WantTextInput || chatInputActive;
         const bool widgetActive = ImGui::IsAnyItemActive();
         const bool widgetFocused = ImGui::IsAnyItemFocused();
+        static bool showShortcuts = false;
         if (!hasTextFocus && !widgetActive && !widgetFocused && !anyPopupOpen) {
             const bool ctrlDown = io.KeyCtrl;
+            if (ImGui::IsKeyPressed(ImGuiKey_F1))
+                showShortcuts = !showShortcuts;
+            if (showShortcuts && ImGui::IsKeyPressed(ImGuiKey_Escape))
+                showShortcuts = false;
             if (hasMedia && ImGui::IsKeyPressed(ImGuiKey_Space))
                 togglePlay();
             if (hasMedia && ImGui::IsKeyPressed(ImGuiKey_M))
@@ -3253,6 +3324,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
                 ImGui::EndMenu();
             }
             ImGui::Separator();
+            if (ImGui::MenuItem("Keyboard Shortcuts", "F1"))
+                showShortcuts = true;
             if (ImGui::MenuItem(g_fullscreen ? "Windowed" : "Fullscreen"))
                 g_pendingToggleFullscreen = true;
             if (ImGui::MenuItem("Copy Session Link")) {
@@ -3273,6 +3346,60 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             ImGui::EndPopup();
         }
         ImGui::PopStyleVar(4);
+
+        if (showShortcuts) {
+            struct ShortcutRow { const char* keys; const char* action; };
+            static const ShortcutRow kShortcuts[] = {
+                {"Space", "Play / Pause"},
+                {"M", "Mute / Unmute"},
+                {"Left / Right", "Seek 5s  (Ctrl: 10s)"},
+                {"Up / Down", "Volume 5  (Ctrl: 10)"},
+                {"F11  or  Alt+Enter", "Toggle fullscreen"},
+                {"Esc", "Exit fullscreen"},
+                {"Double-click video", "Toggle fullscreen"},
+                {"Right-click video", "Player menu"},
+                {"Enter (in chat)", "Send message"},
+                {"F1", "Show / hide this help"},
+            };
+            const float shW = tune(400.0f);
+            ImGui::SetNextWindowPos(ImVec2(static_cast<float>(ui_w) * 0.5f,
+                                           static_cast<float>(ui_h) * 0.5f),
+                                    ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(shW, 0.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.95f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, tune(12.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(tune(20.0f), tune(16.0f)));
+            ImGui::Begin("##Shortcuts", &showShortcuts,
+                         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_AlwaysAutoResize);
+            if (font22)
+                ImGui::PushFont(font22);
+            ImGui::TextUnformatted("Keyboard Shortcuts");
+            if (font22)
+                ImGui::PopFont();
+            ImGui::SameLine(ImGui::GetWindowWidth() - tune(46.0f));
+            if (ImGui::SmallButton("X"))
+                showShortcuts = false;
+            ImGui::Separator();
+            ImGui::Spacing();
+            if (ImGui::BeginTable("ShortcutTable", 2, ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TableSetupColumn("Keys", ImGuiTableColumnFlags_WidthFixed, tune(170.0f));
+                ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthStretch);
+                for (const auto& row : kShortcuts) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_CheckMark], "%s", row.keys);
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextUnformatted(row.action);
+                }
+                ImGui::EndTable();
+            }
+            if (ImGui::IsWindowHovered(hoverFlags))
+                uiHovered = true;
+            ImGui::End();
+            ImGui::PopStyleVar(2);
+        }
 
         if (!app.events.empty()) {
             // Toast: symmetric padding with each line centred both axes. Size off the

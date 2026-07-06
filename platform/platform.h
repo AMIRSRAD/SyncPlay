@@ -4,6 +4,7 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <string>
+#include <vector>
 #include <atomic>
 
 struct SwRenderState;
@@ -39,7 +40,7 @@ extern bool g_pendingTogglePlay;
 extern bool g_pendingDrop;
 extern bool g_pendingDpiChange;
 extern unsigned int g_pendingDpiValue;
-extern std::wstring g_dropPath;
+extern std::vector<std::wstring> g_dropPaths;
 extern SwRenderState* g_renderState;
 extern std::atomic<bool> g_requestExit;
 extern std::atomic<bool> g_inSizing;

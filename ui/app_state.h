@@ -84,6 +84,9 @@ struct AppState {
     float subtitleDelay = 0.0f;
     bool subtitlesEnabled = true;
     char subtitleFont[128]{};
+    // OpenSubtitles online search (user-supplied API key from opensubtitles.com).
+    char openSubsApiKey[128]{};
+    char openSubsLangs[32] = "en";
     float subtitleFontSize = 36.0f;
     float subtitleColor[3]{1.0f, 1.0f, 1.0f};
     float subtitleOpacity = 1.0f;

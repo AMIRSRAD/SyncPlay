@@ -94,7 +94,7 @@ public:
     void setShareProgressCallback(ShareProgressCallback cb);
 
 private:
-    void onRelayState(double time, bool playing, double speed, uint64_t seq);
+    void onRelayState(double time, bool playing, double speed, uint64_t seq, double hostLatency);
     void onRelayPeerUpdate(bool hostOnline, int guestCount);
     void onConnectionStateChanged();
     void onRelayIntent(const std::string& action, double value);
@@ -202,6 +202,8 @@ private:
 
     std::chrono::steady_clock::time_point m_lastSend{};
     std::chrono::milliseconds m_sendInterval{1500};
+    std::chrono::steady_clock::time_point m_lastPing{};
+    std::chrono::milliseconds m_pingInterval{2000};
     std::chrono::steady_clock::time_point m_allowImmediateSeekUntil{};
     std::chrono::milliseconds m_allowImmediateSeekWindow{1500};
 

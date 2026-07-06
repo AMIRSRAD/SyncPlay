@@ -364,6 +364,16 @@ void SignalingServer::onTextMessage(rtc::WebSocket* socket, const std::string& m
         return;
 
     std::string type = j.value("type", "");
+    if (type == "ping") {
+        // RTT probe: echo straight back to the sender with its timestamp intact.
+        // Works pre-join too, so latency is known before the first state message.
+        auto pingPeer = m_peers.find(socket);
+        if (pingPeer != m_peers.end() && pingPeer->second.socket) {
+            j["type"] = "pong";
+            pingPeer->second.socket->send(j.dump());
+        }
+        return;
+    }
     if (type == "join") {
         std::string code = Trim(j.value("code", std::string()));
         std::string role = ToLower(Trim(j.value("role", std::string())));

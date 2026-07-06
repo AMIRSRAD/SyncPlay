@@ -18,6 +18,8 @@
 #include "ui_helpers.h"
 #include "panel_utils.h"
 #include "chat_text.h"
+#include "../core/update_check.h"
+#include "../media/opensubtitles.h"
 #include "../media/mpv_helpers.h"
 #include "../sync/sync_session.h"
 #include "../network/relay_voice.h"
@@ -277,7 +279,20 @@ void DrawSettingsPanel(PanelContext& ctx) {
                     ImGui::TextUnformatted("SyncPlay");
                     if (font22)
                         ImGui::PopFont();
-                    ImGui::TextDisabled("Version 1.0.0");
+#ifdef SYNCPLAY_VERSION
+                    ImGui::TextDisabled("Version " SYNCPLAY_VERSION);
+#else
+                    ImGui::TextDisabled("Version (dev)");
+#endif
+                    {
+                        const std::string latestVersion = UpdateAvailableVersion();
+                        if (!latestVersion.empty()) {
+                            ImGui::TextColored(accent, "Update available: %s", latestVersion.c_str());
+                            ImGui::SameLine();
+                            if (ImGui::TextLink("Get it"))
+                                ctx.openUrl("https://github.com/AMIRSRAD/SyncPlay/releases/latest");
+                        }
+                    }
                     ImGui::Separator();
                     ImGui::Spacing();
 
@@ -720,6 +735,90 @@ void DrawSubsPanel(PanelContext& ctx) {
                 } else {
                     int64_t value = selected;
                     mpv_set_property(mpv, "sid", MPV_FORMAT_INT64, &value);
+                }
+            }
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Online Search");
+            {
+                const OsSnapshot os = OsGetSnapshot();
+                char* mpvPath = mpv_get_property_string(mpv, "path");
+                const std::string mediaPath = mpvPath ? mpvPath : "";
+                if (mpvPath)
+                    mpv_free(mpvPath);
+
+                if (ImGui::InputText("API Key", app.openSubsApiKey, sizeof(app.openSubsApiKey),
+                                     ImGuiInputTextFlags_Password))
+                    app.dirty = true;
+                if (app.openSubsApiKey[0] == '\0') {
+                    ImGui::SameLine();
+                    if (ImGui::TextLink("Get one"))
+                        ctx.openUrl("https://www.opensubtitles.com/consumers");
+                }
+                ImGui::SetNextItemWidth(ctx.tune(120.0f));
+                if (ImGui::InputText("Languages", app.openSubsLangs, sizeof(app.openSubsLangs)))
+                    app.dirty = true;
+                if (ImGui::IsItemHovered())
+                    ShowDelayedTooltip("Comma-separated codes, e.g. en,fa");
+
+                const bool busy = os.phase == OsPhase::Searching || os.phase == OsPhase::Downloading;
+                const bool canSearch = !busy && app.openSubsApiKey[0] != '\0' && !mediaPath.empty();
+                if (!canSearch)
+                    ImGui::BeginDisabled();
+                if (ImGui::Button("Search Online"))
+                    OsStartSearch(app.openSubsApiKey, mediaPath, app.openSubsLangs);
+                if (!canSearch)
+                    ImGui::EndDisabled();
+                if (app.openSubsApiKey[0] == '\0') {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("API key required");
+                } else if (mediaPath.empty()) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("Load a video first");
+                }
+
+                if (!os.message.empty() && os.phase != OsPhase::Idle) {
+                    const bool isError = os.phase == OsPhase::Error;
+                    ImGui::TextColored(isError ? ImVec4(0.95f, 0.34f, 0.28f, 1.0f)
+                                               : ImGui::GetStyle().Colors[ImGuiCol_TextDisabled],
+                                       "%s", os.message.c_str());
+                }
+                if (os.phase == OsPhase::Downloaded && !os.downloadedPath.empty()) {
+                    const char* cmd[] = {"sub-add", os.downloadedPath.c_str(), "select", nullptr};
+                    mpv_command(mpv, cmd);
+                    app.events.push_back({"Subtitles loaded", 2.0f});
+                    OsAcknowledgeDownload();
+                }
+                if ((os.phase == OsPhase::Results || os.phase == OsPhase::Downloading) &&
+                    !os.results.empty()) {
+                    ImGui::BeginChild("OsResults", ImVec2(0.0f, ctx.tune(120.0f)), false);
+                    if (ImGui::BeginTable("OsResultsTable", 3,
+                                          ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
+                        ImGui::TableSetupColumn("Lang", ImGuiTableColumnFlags_WidthFixed, ctx.tune(38.0f));
+                        ImGui::TableSetupColumn("Release", ImGuiTableColumnFlags_WidthStretch);
+                        ImGui::TableSetupColumn("Get", ImGuiTableColumnFlags_WidthFixed, ctx.tune(64.0f));
+                        int osRow = 0;
+                        for (const auto& r : os.results) {
+                            ImGui::PushID(osRow++);
+                            ImGui::TableNextRow();
+                            ImGui::TableSetColumnIndex(0);
+                            ImGui::TextUnformatted(r.language.c_str());
+                            ImGui::TableSetColumnIndex(1);
+                            ImGui::TextUnformatted(r.release.c_str());
+                            if (ImGui::IsItemHovered() && !r.release.empty())
+                                ShowDelayedTooltip(r.release.c_str());
+                            ImGui::TableSetColumnIndex(2);
+                            if (busy)
+                                ImGui::BeginDisabled();
+                            if (ImGui::SmallButton("Download"))
+                                OsStartDownload(app.openSubsApiKey, r);
+                            if (busy)
+                                ImGui::EndDisabled();
+                            ImGui::PopID();
+                        }
+                        ImGui::EndTable();
+                    }
+                    ImGui::EndChild();
                 }
             }
 
@@ -1526,10 +1625,13 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
             }
 
             if (app.showEmoji) {
+                const float emojiW = tune(260.0f);
+                const float emojiH = tune(120.0f);
                 ImGui::SetNextWindowBgAlpha(0.96f);
-                ImGui::SetNextWindowPos(ImVec2(panelPos.x + panelSize.x - 264.0f, panelPos.y + panelSize.y - 124.0f),
+                ImGui::SetNextWindowPos(ImVec2(panelPos.x + panelSize.x - emojiW - tune(4.0f),
+                                               panelPos.y + panelSize.y - emojiH - tune(4.0f)),
                                         ImGuiCond_Always);
-                ImGui::SetNextWindowSize(ImVec2(260, 120), ImGuiCond_Always);
+                ImGui::SetNextWindowSize(ImVec2(emojiW, emojiH), ImGuiCond_Always);
                 ImGui::Begin("Emoji", &app.showEmoji,
                              ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize);
                 if (ImGui::IsWindowHovered(hoverFlags))
