@@ -26,11 +26,14 @@ struct ChatInputCursor {
 int ChatInputCallback(ImGuiInputTextCallbackData* data);
 bool NeedsComplexText(const char* utf8);
 void ReleaseChatTexture(ChatTextTexture& tex);
+// cropTight trims the texture to the glyphs' actual pixels (used for emoji, so
+// centring the texture centres the glyph; layout boxes carry baseline padding).
 bool RenderChatTextTexture(const std::wstring& text, float wrapWidth, float fontSize,
                            const ImVec4& color, ChatTextTexture& out,
                            DWRITE_WORD_WRAPPING wrapping = DWRITE_WORD_WRAPPING_WRAP,
                            float* outCaretX = nullptr, float* outCaretY = nullptr,
-                           float* outCaretH = nullptr, int caretPos = -1);
+                           float* outCaretH = nullptr, int caretPos = -1,
+                           bool cropTight = false);
 
 std::string ChatTimestamp();
 std::string FormatBytes(int64_t bytes);

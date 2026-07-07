@@ -45,6 +45,12 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; Everything the build script staged (exe + app DLLs + VC++ runtime).
 Source: "stage\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
+[Registry]
+; syncplay:// invite links open the app and auto-join the session.
+Root: HKA; Subkey: "Software\Classes\syncplay"; ValueType: string; ValueData: "URL:SyncPlay Session Link"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\syncplay"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\syncplay\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"

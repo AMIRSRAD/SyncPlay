@@ -485,7 +485,7 @@ void SignalingServer::onTextMessage(rtc::WebSocket* socket, const std::string& m
         return;
     }
 
-    if (type == "state" || type == "file" || type == "chat") {
+    if (type == "state" || type == "file" || type == "chat" || type == "reaction") {
         if (session->mode != "relay") {
             LogWarn("signaling") << "Relay message ignored outside relay session " << type << std::endl;
             return;
@@ -496,7 +496,7 @@ void SignalingServer::onTextMessage(rtc::WebSocket* socket, const std::string& m
         }
         j["code"] = info.code;
         std::string payload = j.dump();
-        if (type == "chat" || type == "state") {
+        if (type == "chat" || type == "state" || type == "reaction") {
             if (info.role == "host") {
                 for (const auto& guest : session->guests) {
                     if (guest)

@@ -49,6 +49,8 @@ public:
     void requestSeekDelta(double delta);
     void requestSpeed(double speed);
     bool sendChatMessage(const std::string& message);
+    // Ephemeral emoji reaction, relayed to every peer in the session.
+    bool sendReaction(const std::string& emoji);
     bool sendSharedFile(const std::string& path, std::string* outShareId = nullptr);
     void startVoiceCall();
     void stopVoiceCall();
@@ -76,6 +78,7 @@ public:
     std::string hintText() const;
 
     using ChatCallback = std::function<void(const std::string&)>;
+    using ReactionCallback = std::function<void(const std::string&)>;
     using ActionCallback = std::function<void(const std::string&)>;
     using StatusCallback = std::function<void()>;
     using ShareProgressCallback = std::function<void(const std::string& id,
@@ -89,6 +92,7 @@ public:
                                                      bool failed)>;
 
     void setChatCallback(ChatCallback cb);
+    void setReactionCallback(ReactionCallback cb);
     void setActionCallback(ActionCallback cb);
     void setStatusCallback(StatusCallback cb);
     void setShareProgressCallback(ShareProgressCallback cb);
@@ -211,6 +215,7 @@ private:
     std::string m_hintText;
 
     ChatCallback m_chatCallback;
+    ReactionCallback m_reactionCallback;
     ActionCallback m_actionCallback;
     StatusCallback m_statusCallback;
     ShareProgressCallback m_shareProgressCallback;

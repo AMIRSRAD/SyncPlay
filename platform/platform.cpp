@@ -1,8 +1,10 @@
 #include "platform.h"
 
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <dwmapi.h>
 #include <tchar.h>
+#include <algorithm>
 #include <cmath>
 #include <windowsx.h>
 #include <backends/imgui_impl_win32.h>
@@ -51,6 +53,9 @@ int g_blurTexH = 0;
 bool g_blurReady = false;
 bool g_glassEnabled = true;
 
+float g_videoAccentColor[3] = {0.0f, 0.0f, 0.0f};
+bool g_videoAccentValid = false;
+
 HWND g_hWnd = nullptr;
 bool g_fullscreen = false;
 WINDOWPLACEMENT g_wpPrev = { sizeof(g_wpPrev) };
@@ -58,6 +63,8 @@ DWORD g_stylePrev = 0;
 DWORD g_exStylePrev = 0;
 bool g_pendingToggleFullscreen = false;
 bool g_pendingTogglePlay = false;
+bool g_pendingPlaylistPrev = false;
+bool g_pendingPlaylistNext = false;
 bool g_pendingDrop = false;
 bool g_pendingDpiChange = false;
 unsigned int g_pendingDpiValue = 96;
@@ -133,8 +140,163 @@ void ToggleFullscreen(HWND hWnd) {
     }
 }
 
+// ---- Taskbar integration ----------------------------------------------------
+// Progress on the taskbar icon + prev/play-pause/next thumbnail toolbar.
+namespace {
+constexpr UINT kThumbPrev = 1001;
+constexpr UINT kThumbPlayPause = 1002;
+constexpr UINT kThumbNext = 1003;
+
+ITaskbarList3* g_taskbar = nullptr;
+bool g_thumbButtonsAdded = false;
+bool g_thumbShowsPause = false;
+HICON g_thumbIconPrev = nullptr;
+HICON g_thumbIconNext = nullptr;
+HICON g_thumbIconPlay = nullptr;
+HICON g_thumbIconPause = nullptr;
+
+UINT TaskbarButtonCreatedMsg() {
+    static const UINT msg = RegisterWindowMessageW(L"TaskbarButtonCreated");
+    return msg;
+}
+
+// Render a Segoe MDL2 glyph into a small white-on-transparent HICON. GDI text
+// writes no alpha, so derive it from the glyph's luminance afterwards.
+HICON CreateGlyphIcon(wchar_t glyph, int size) {
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = size;
+    bi.bmiHeader.biHeight = -size;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HDC screen = GetDC(nullptr);
+    HBITMAP color = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HDC dc = CreateCompatibleDC(screen);
+    ReleaseDC(nullptr, screen);
+    if (!color || !dc || !bits) {
+        if (color) DeleteObject(color);
+        if (dc) DeleteDC(dc);
+        return nullptr;
+    }
+    HGDIOBJ oldBmp = SelectObject(dc, color);
+    memset(bits, 0, static_cast<size_t>(size) * size * 4);
+    HFONT font = CreateFontW(-(size * 3 / 4), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                             ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe MDL2 Assets");
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(255, 255, 255));
+    RECT rc{0, 0, size, size};
+    wchar_t text[2] = {glyph, 0};
+    DrawTextW(dc, text, 1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+    SelectObject(dc, oldFont);
+    DeleteObject(font);
+    SelectObject(dc, oldBmp);
+    DeleteDC(dc);
+    auto* px = static_cast<uint32_t*>(bits);
+    for (int i = 0; i < size * size; ++i) {
+        const uint32_t v = px[i] & 0xFF; // white text: any channel is the coverage
+        px[i] = (v << 24) | (v << 16) | (v << 8) | v; // premultiplied white
+    }
+    HBITMAP mask = CreateBitmap(size, size, 1, 1, nullptr);
+    ICONINFO ii{};
+    ii.fIcon = TRUE;
+    ii.hbmColor = color;
+    ii.hbmMask = mask;
+    HICON icon = CreateIconIndirect(&ii);
+    DeleteObject(color);
+    DeleteObject(mask);
+    return icon;
+}
+
+void EnsureThumbButtons(HWND hWnd) {
+    if (!g_taskbar) {
+        if (FAILED(CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER,
+                                    IID_PPV_ARGS(&g_taskbar))) ||
+            !g_taskbar)
+            return;
+        if (FAILED(g_taskbar->HrInit())) {
+            g_taskbar->Release();
+            g_taskbar = nullptr;
+            return;
+        }
+    }
+    const int iconSz = GetSystemMetrics(SM_CXSMICON);
+    if (!g_thumbIconPrev) g_thumbIconPrev = CreateGlyphIcon(0xE892, iconSz);
+    if (!g_thumbIconNext) g_thumbIconNext = CreateGlyphIcon(0xE893, iconSz);
+    if (!g_thumbIconPlay) g_thumbIconPlay = CreateGlyphIcon(0xE768, iconSz);
+    if (!g_thumbIconPause) g_thumbIconPause = CreateGlyphIcon(0xE769, iconSz);
+
+    THUMBBUTTON btns[3]{};
+    for (int i = 0; i < 3; ++i) {
+        btns[i].dwMask = static_cast<THUMBBUTTONMASK>(THB_ICON | THB_TOOLTIP | THB_FLAGS);
+        btns[i].dwFlags = THBF_ENABLED;
+    }
+    btns[0].iId = kThumbPrev;
+    btns[0].hIcon = g_thumbIconPrev;
+    wcscpy_s(btns[0].szTip, L"Previous");
+    btns[1].iId = kThumbPlayPause;
+    btns[1].hIcon = g_thumbIconPlay;
+    wcscpy_s(btns[1].szTip, L"Play / Pause");
+    btns[2].iId = kThumbNext;
+    btns[2].hIcon = g_thumbIconNext;
+    wcscpy_s(btns[2].szTip, L"Next");
+    if (g_thumbButtonsAdded)
+        g_taskbar->ThumbBarUpdateButtons(hWnd, 3, btns);
+    else if (SUCCEEDED(g_taskbar->ThumbBarAddButtons(hWnd, 3, btns)))
+        g_thumbButtonsAdded = true;
+    g_thumbShowsPause = false;
+}
+} // namespace
+
+void UpdateTaskbar(HWND hWnd, double position, double duration, bool paused, bool hasMedia) {
+    if (!g_taskbar || !hWnd)
+        return;
+    if (!hasMedia || duration <= 0.01) {
+        g_taskbar->SetProgressState(hWnd, TBPF_NOPROGRESS);
+    } else {
+        g_taskbar->SetProgressState(hWnd, paused ? TBPF_PAUSED : TBPF_NORMAL);
+        const ULONGLONG total = 10000;
+        const ULONGLONG cur = static_cast<ULONGLONG>(
+            std::clamp(position / duration, 0.0, 1.0) * static_cast<double>(total));
+        g_taskbar->SetProgressValue(hWnd, cur, total);
+    }
+    // The middle thumb button shows the action it would perform.
+    const bool wantPause = hasMedia && !paused;
+    if (g_thumbButtonsAdded && wantPause != g_thumbShowsPause) {
+        THUMBBUTTON b{};
+        b.dwMask = static_cast<THUMBBUTTONMASK>(THB_ICON | THB_TOOLTIP);
+        b.iId = kThumbPlayPause;
+        b.hIcon = wantPause ? g_thumbIconPause : g_thumbIconPlay;
+        wcscpy_s(b.szTip, wantPause ? L"Pause" : L"Play");
+        g_taskbar->ThumbBarUpdateButtons(hWnd, 1, &b);
+        g_thumbShowsPause = wantPause;
+    }
+}
+
+void CleanupTaskbar() {
+    if (g_taskbar) {
+        g_taskbar->Release();
+        g_taskbar = nullptr;
+    }
+    for (HICON* icon : {&g_thumbIconPrev, &g_thumbIconNext, &g_thumbIconPlay, &g_thumbIconPause}) {
+        if (*icon) {
+            DestroyIcon(*icon);
+            *icon = nullptr;
+        }
+    }
+    g_thumbButtonsAdded = false;
+}
+
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     const bool imguiHandled = ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
+
+    if (msg == TaskbarButtonCreatedMsg()) {
+        EnsureThumbButtons(hWnd);
+        return 0;
+    }
 
     switch (msg) {
     case WM_NCACTIVATE:
@@ -300,6 +462,34 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         else if (wParam == VK_ESCAPE && g_fullscreen)
             g_pendingToggleFullscreen = true;
         return 0;
+    case WM_COMMAND:
+        // Taskbar thumbnail toolbar buttons.
+        if (HIWORD(wParam) == THBN_CLICKED) {
+            switch (LOWORD(wParam)) {
+            case kThumbPrev: g_pendingPlaylistPrev = true; return 0;
+            case kThumbPlayPause: g_pendingTogglePlay = true; return 0;
+            case kThumbNext: g_pendingPlaylistNext = true; return 0;
+            }
+        }
+        break;
+    case WM_APPCOMMAND: {
+        // Hardware media keys (also sent by some headsets/remotes).
+        const int cmd = GET_APPCOMMAND_LPARAM(lParam);
+        if (cmd == APPCOMMAND_MEDIA_PLAY_PAUSE || cmd == APPCOMMAND_MEDIA_PLAY ||
+            cmd == APPCOMMAND_MEDIA_PAUSE) {
+            g_pendingTogglePlay = true;
+            return TRUE;
+        }
+        if (cmd == APPCOMMAND_MEDIA_NEXTTRACK) {
+            g_pendingPlaylistNext = true;
+            return TRUE;
+        }
+        if (cmd == APPCOMMAND_MEDIA_PREVIOUSTRACK) {
+            g_pendingPlaylistPrev = true;
+            return TRUE;
+        }
+        break;
+    }
     }
     if (imguiHandled)
         return true;

@@ -33,11 +33,24 @@ struct ChatLine {
     int64_t fileTransferred = 0;
     std::string transferId;
     std::string retryPath;
+    // Runtime-only: when this line first appeared on screen (for the one-shot
+    // entrance animation). Negative = not yet stamped by the chat draw loop.
+    double appearAt = -1.0;
 };
 
 struct EventToast {
     std::string text;
     float ttl = 0.0f;
+    // Runtime-only: stamped by the renderer for the slide-in animation.
+    double addedAt = -1.0;
+};
+
+// One entry of the "Continue watching" list shown on the idle screen.
+struct RecentMedia {
+    std::string path;      // UTF-8 absolute path
+    double position = 0.0; // last playback position (seconds)
+    double duration = 0.0; // media duration if known (seconds)
+    int64_t lastWatched = 0; // unix time of last playback
 };
 
 struct AppState {
@@ -54,6 +67,7 @@ struct AppState {
     bool settingsDocked = true;
     bool sidePanels = false;
     bool glassPanels = true;
+    bool dynamicAccent = true;
     bool allowGuestControl = true;
     bool autoPromote = false;
     bool lanMode = false;
@@ -133,6 +147,7 @@ struct AppState {
 
     std::deque<ChatLine> chat;
     std::deque<EventToast> events;
+    std::vector<RecentMedia> recentMedia; // most-recent first, capped at 8
 };
 
 std::filesystem::path config_path();

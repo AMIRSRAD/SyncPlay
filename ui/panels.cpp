@@ -204,6 +204,9 @@ void DrawSettingsPanel(PanelContext& ctx) {
                         app.accentColor[2] = accent.z;
                         app.dirty = true;
                     }
+                    if (ImGui::Checkbox("Dynamic accent (match video)", &app.dynamicAccent))
+                        app.dirty = true;
+                    ImGui::TextDisabled("Tints the interface with the video's dominant colour.");
                     ImGui::Separator();
                     ImGui::TextUnformatted("Panels");
                     if (ImGui::Checkbox("Frosted glass (blur)", &app.glassPanels))
@@ -896,6 +899,7 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
     const std::string ICON_CHAT = ctx.iconChat;
     const std::string ICON_OVERLAY = ctx.iconOverlay;
     const std::string ICON_SIDEBAR = ctx.iconSidebar;
+    const std::string ICON_EMOJI = ctx.iconEmoji;
     const float panelAlpha = g_fullscreen ? 0.65f : 0.94f;
 
     {
@@ -908,12 +912,19 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
                 ImVec4 railBg = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
                 railBg.w = std::min(1.0f, panelAlpha * panelFade);
                 ImGui::SetCursorPos(panelPos);
+                // Same padding as the overlay chat (padScale 0.6). A borderless
+                // child ignores WindowPadding unless AlwaysUseWindowPadding is set,
+                // which left the sidebar content hugging the top/bottom edges.
+                const float railFs = ImGui::GetFontSize();
+                const ImVec2 railPad(std::max(basePad.x, railFs * 1.6f) * 0.6f,
+                                     std::max(basePad.y, railFs * 1.25f) * 0.6f);
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, railBg);
                 ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
-                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, basePad);
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, railPad);
                 ImGui::PushStyleVar(ImGuiStyleVar_Alpha, panelFade);
                 ImGui::BeginChild("ChatPanel", panelSize, false,
-                                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                                  ImGuiWindowFlags_AlwaysUseWindowPadding);
             } else {
                 BeginPanelNoScroll("ChatPanel", panelPos, panelSize, panelAlpha, panelFade, basePad, 0.6f);
             }
@@ -949,7 +960,7 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
                 chatSubView = 0;
             }
             ImGui::SameLine();
-            if (IconButtonFont("ChatEmoji", ICON_CHAT.c_str(), "Emoji",
+            if (IconButtonFont("ChatEmoji", ICON_EMOJI.c_str(), "Emoji",
                                fontIconsSmall, headerBtnSize))
                 app.showEmoji = !app.showEmoji;
             ImGui::SameLine();
@@ -1218,13 +1229,39 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
             const float groupSpacing = roundPixel(bubbleSpacing * 1.6f);
             const float nameLineH = ImGui::GetTextLineHeight();
             const float nameGapH = nameLineH + roundPixel(chatU * 0.15f);
-            const float nameIndent = roundPixel(chatU * 0.5f);
             const auto bubbleCorners = [](bool mine, bool atEnd) -> ImDrawFlags {
                 if (!atEnd)
                     return ImDrawFlags_RoundCornersAll;
                 return mine ? (ImDrawFlags_RoundCornersAll & ~ImDrawFlags_RoundCornersBottomRight)
                             : (ImDrawFlags_RoundCornersAll & ~ImDrawFlags_RoundCornersBottomLeft);
             };
+            // Stable per-sender avatar colour (FNV hash of the name -> hue).
+            const auto senderColor = [](const std::string& who) {
+                uint32_t h = 2166136261u;
+                for (unsigned char c : who) {
+                    h ^= c;
+                    h *= 16777619u;
+                }
+                float r = 0.0f, g = 0.0f, b = 0.0f;
+                ImGui::ColorConvertHSVtoRGB(static_cast<float>(h % 360u) / 360.0f, 0.55f, 0.85f,
+                                            r, g, b);
+                return ImVec4(r, g, b, 1.0f);
+            };
+            // First UTF-8 codepoint of the name, uppercased when ASCII.
+            const auto firstGlyph = [](const std::string& s) -> std::string {
+                if (s.empty())
+                    return "?";
+                const unsigned char c = static_cast<unsigned char>(s[0]);
+                size_t len = (c < 0x80) ? 1 : (c < 0xE0) ? 2 : (c < 0xF0) ? 3 : 4;
+                len = std::min(len, s.size());
+                std::string glyph = s.substr(0, len);
+                if (glyph.size() == 1)
+                    glyph[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(glyph[0])));
+                return glyph;
+            };
+            // Lines present on the very first drawn frame are history: stamp them
+            // with 0 so only genuinely new messages play the entrance animation.
+            static bool chatHistoryStamped = false;
             for (int i = 0; i < chatN; ++i) {
                 ChatLine& line = app.chat[static_cast<size_t>(i)];
                 ImGui::PushID(i);
@@ -1237,10 +1274,43 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
                 const float endSpacing = groupEnd ? groupSpacing : intraSpacing;
                 const bool showName = !isMine && !isSystem && groupStart && !line.who.empty();
                 const ImVec2 startPos = ImGui::GetCursorPos();
+
+                // One-shot entrance: new lines rise ~14px while fading in.
+                if (line.appearAt < 0.0)
+                    line.appearAt = chatHistoryStamped ? ImGui::GetTime() : 0.0;
+                float appear = 1.0f;
+                if (line.appearAt > 0.0) {
+                    const float t = static_cast<float>((ImGui::GetTime() - line.appearAt) / 0.22);
+                    appear = std::clamp(t, 0.0f, 1.0f);
+                    appear = appear * appear * (3.0f - 2.0f * appear);
+                }
+                const float rise = (1.0f - appear) * tune(14.0f);
+                const bool fading = appear < 0.999f;
+                if (fading)
+                    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * appear);
+
                 float headerH = 0.0f;
                 if (showName) {
                     const ImVec2 nameScreen = ImGui::GetCursorScreenPos();
-                    drawList->AddText(ImVec2(roundPixel(nameScreen.x + nameIndent), roundPixel(nameScreen.y)),
+                    const float avatarD = nameLineH;
+                    const float avatarR = avatarD * 0.5f;
+                    ImVec4 avCol = senderColor(line.who);
+                    avCol.w = 0.92f * appear;
+                    const ImVec2 avCenter(roundPixel(nameScreen.x + avatarR),
+                                          roundPixel(nameScreen.y + rise + avatarR));
+                    drawList->AddCircleFilled(avCenter, avatarR,
+                                              ImGui::ColorConvertFloat4ToU32(avCol), 24);
+                    const std::string initial = firstGlyph(line.who);
+                    const float avFontSize = avatarD * 0.62f;
+                    const ImVec2 gs = textFont->CalcTextSizeA(avFontSize, FLT_MAX, 0.0f,
+                                                              initial.c_str());
+                    drawList->AddText(textFont, avFontSize,
+                                      ImVec2(avCenter.x - gs.x * 0.5f, avCenter.y - gs.y * 0.5f),
+                                      ImGui::ColorConvertFloat4ToU32(
+                                          ImVec4(0.05f, 0.06f, 0.08f, 0.95f * appear)),
+                                      initial.c_str());
+                    drawList->AddText(ImVec2(roundPixel(nameScreen.x + avatarD + chatU * 0.5f),
+                                             roundPixel(nameScreen.y + rise)),
                                       ImGui::GetColorU32(ImGuiCol_TextDisabled), line.who.c_str());
                     headerH = nameGapH;
                 }
@@ -1256,14 +1326,17 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
                     const ImVec2 chipScreen = ImGui::GetCursorScreenPos();
                     ImGui::InvisibleButton("SystemChip", chipSize);
                     ImVec4 chipCol = ImGui::GetStyle().Colors[ImGuiCol_FrameBg];
-                    chipCol.w = std::min(0.62f, chipCol.w + 0.12f);
-                    drawList->AddRectFilled(chipScreen,
-                                            ImVec2(chipScreen.x + chipSize.x, chipScreen.y + chipSize.y),
+                    chipCol.w = std::min(0.62f, chipCol.w + 0.12f) * appear;
+                    drawList->AddRectFilled(ImVec2(chipScreen.x, chipScreen.y + rise),
+                                            ImVec2(chipScreen.x + chipSize.x,
+                                                   chipScreen.y + rise + chipSize.y),
                                             ImGui::ColorConvertFloat4ToU32(chipCol),
                                             chipSize.y * 0.5f);
-                    drawList->AddText(ImVec2(chipScreen.x + chipPad.x, chipScreen.y + chipPad.y),
+                    drawList->AddText(ImVec2(chipScreen.x + chipPad.x, chipScreen.y + rise + chipPad.y),
                                       ImGui::GetColorU32(ImGuiCol_TextDisabled), label.c_str());
                     ImGui::SetCursorPos(ImVec2(startPos.x, roundPixel(startPos.y + chipSize.y + endSpacing)));
+                    if (fading)
+                        ImGui::PopStyleVar();
                     ImGui::PopID();
                     continue;
                 }
@@ -1284,21 +1357,22 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
                     const bool cardHovered = ImGui::IsItemHovered();
                     if (canOpenFileCard && cardHovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
                         openFolder(openPath);
+                    const ImVec2 cardDrawMin(cardMin.x, cardMin.y + rise);
                     ImVec4 cardCol = isMine ? ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]
                                             : ImGui::GetStyle().Colors[ImGuiCol_FrameBg];
-                    cardCol.w = std::min(0.86f, cardCol.w + 0.16f);
-                    drawList->AddRectFilled(cardMin,
-                                            ImVec2(cardMin.x + cardSize.x, cardMin.y + cardSize.y),
+                    cardCol.w = std::min(0.86f, cardCol.w + 0.16f) * appear;
+                    drawList->AddRectFilled(cardDrawMin,
+                                            ImVec2(cardDrawMin.x + cardSize.x, cardDrawMin.y + cardSize.y),
                                             ImGui::ColorConvertFloat4ToU32(cardCol),
                                             bubbleRounding, bubbleCorners(isMine, groupEnd));
-                    drawList->AddRect(cardMin,
-                                      ImVec2(cardMin.x + cardSize.x, cardMin.y + cardSize.y),
+                    drawList->AddRect(cardDrawMin,
+                                      ImVec2(cardDrawMin.x + cardSize.x, cardDrawMin.y + cardSize.y),
                                       ImGui::GetColorU32(ImGuiCol_Border), bubbleRounding,
                                       bubbleCorners(isMine, groupEnd));
 
                     const ImVec2 innerPad(chatU * 0.75f, chatU * 0.55f);
-                    const float innerX = cardMin.x + innerPad.x;
-                    float innerY = cardMin.y + innerPad.y;
+                    const float innerX = cardDrawMin.x + innerPad.x;
+                    float innerY = cardDrawMin.y + innerPad.y;
                     const std::string fileName = line.fileName.empty()
                                                      ? (line.filePath.empty() ? line.text : FileNameFromPath(line.filePath))
                                                      : line.fileName;
@@ -1312,7 +1386,8 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
                                                     chatStatusText(line.status))
                                                  : (FormatBytes(line.fileSize) + " - " +
                                                     chatStatusText(line.status));
-                    const ImVec4 statusCol = line.status == ChatLineStatus::Failed ? failedStatusColor() : chatStatusColor();
+                    ImVec4 statusCol = line.status == ChatLineStatus::Failed ? failedStatusColor() : chatStatusColor();
+                    statusCol.w *= appear;
                     drawList->AddText(ImVec2(innerX, innerY), ImGui::ColorConvertFloat4ToU32(statusCol), meta.c_str());
 
                     const float progressW = std::max(40.0f, cardW - innerPad.x * 2.0f);
@@ -1327,7 +1402,7 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
                         progress = 0.0f;
                     else
                         progress = 1.0f;
-                    const float progressY = cardMin.y + cardH - innerPad.y - 4.0f;
+                    const float progressY = cardDrawMin.y + cardH - innerPad.y - 4.0f;
                     ImGui::SetCursorScreenPos(ImVec2(innerX, progressY));
                     ImGui::ProgressBar(progress, ImVec2(progressW, 4.0f), "");
 
@@ -1338,6 +1413,8 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
                             StyledTooltip(line.time.c_str());
                     }
                     ImGui::SetCursorPos(ImVec2(startPos.x, roundPixel(startPos.y + headerH + cardH + endSpacing)));
+                    if (fading)
+                        ImGui::PopStyleVar();
                     ImGui::PopID();
                     continue;
                 }
@@ -1376,7 +1453,7 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
                 bubblePos.x = roundPixel(bubblePos.x);
                 bubblePos.y = roundPixel(bubblePos.y);
                 const ImVec2 cursorScreen = ImGui::GetCursorScreenPos();
-                ImVec2 bubbleMin(cursorScreen.x + bubbleX, cursorScreen.y + headerH);
+                ImVec2 bubbleMin(cursorScreen.x + bubbleX, cursorScreen.y + headerH + rise);
                 bubbleMin.x = roundPixel(bubbleMin.x);
                 bubbleMin.y = roundPixel(bubbleMin.y);
                 const ImVec2 bubbleMax(bubbleMin.x + bubbleSize.x, bubbleMin.y + bubbleSize.y);
@@ -1387,16 +1464,33 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
                 if (bubbleHovered && !line.time.empty())
                     StyledTooltip(line.time.c_str());
 
+                ImVec4 fillCol = bubbleCol;
+                fillCol.w *= appear;
                 drawList->AddRectFilled(bubbleMin, bubbleMax,
-                                        ImGui::ColorConvertFloat4ToU32(bubbleCol),
+                                        ImGui::ColorConvertFloat4ToU32(fillCol),
                                         bubbleRounding, bubbleCorners(isMine, groupEnd));
+                if (isMine && bubbleSize.x > bubbleRounding * 2.0f + 2.0f) {
+                    // Subtle two-tone sheen: a soft highlight that fades down the top
+                    // half. Inset by the corner radius so it never crosses the rounding.
+                    const ImU32 sheenTop = ImGui::ColorConvertFloat4ToU32(
+                        ImVec4(1.0f, 1.0f, 1.0f, 0.10f * appear));
+                    const ImU32 sheenBot = ImGui::ColorConvertFloat4ToU32(
+                        ImVec4(1.0f, 1.0f, 1.0f, 0.0f));
+                    drawList->AddRectFilledMultiColor(
+                        ImVec2(bubbleMin.x + bubbleRounding, bubbleMin.y + 1.0f),
+                        ImVec2(bubbleMax.x - bubbleRounding,
+                               bubbleMin.y + bubbleSize.y * 0.55f),
+                        sheenTop, sheenTop, sheenBot, sheenBot);
+                }
 
                 const ImVec2 textMin(roundPixel(bubbleMin.x + bubblePad.x),
                                      roundPixel(bubbleMin.y + bubblePad.y));
                 const ImVec2 textMax(textMin.x + textSize.x, textMin.y + textSize.y);
                 if (textTex && textTex->srv) {
                     drawList->AddImage(reinterpret_cast<ImTextureID>(textTex->srv),
-                                       textMin, textMax);
+                                       textMin, textMax, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
+                                       IM_COL32(255, 255, 255,
+                                                static_cast<int>(appear * 255.0f)));
                 } else {
                     ImGui::SetCursorPos(ImVec2(bubblePos.x + bubblePad.x, bubblePos.y + bubblePad.y));
                     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrapWidth);
@@ -1412,17 +1506,22 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
                 if (isMine && line.status == ChatLineStatus::Failed) {
                     const char* statusText = chatStatusText(line.status);
                     if (statusText[0] != '\0') {
-                        const ImVec4 statusCol = line.status == ChatLineStatus::Failed ? failedStatusColor() : chatStatusColor();
+                        ImVec4 statusCol = line.status == ChatLineStatus::Failed ? failedStatusColor() : chatStatusColor();
+                        statusCol.w *= appear;
                         const ImVec2 statusSize = ImGui::CalcTextSize(statusText);
                         const float statusX = std::max(0.0f, contentW - statusSize.x);
-                        drawList->AddText(ImVec2(cursorScreen.x + statusX, cursorScreen.y + nextY - startPos.y),
+                        drawList->AddText(ImVec2(cursorScreen.x + statusX,
+                                                 cursorScreen.y + rise + nextY - startPos.y),
                                           ImGui::ColorConvertFloat4ToU32(statusCol), statusText);
                         nextY += statusSize.y;
                     }
                 }
                 ImGui::SetCursorPos(ImVec2(startPos.x, nextY));
+                if (fading)
+                    ImGui::PopStyleVar();
                 ImGui::PopID();
             }
+            chatHistoryStamped = true;
             const bool showNewChatIndicator =
                 chatUnreadCount > 0 && !scrollToBottom && pendingChatScrollFrames <= 0 && !wasAtBottom;
             if (showNewChatIndicator) {
@@ -1625,32 +1724,79 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
             }
 
             if (app.showEmoji) {
-                const float emojiW = tune(260.0f);
-                const float emojiH = tune(120.0f);
+                // Full-colour emoji picker: each emoji is a D2D-rendered colour
+                // texture, tight-cropped and centred in a fixed square cell.
+                static std::unordered_map<int, ChatTextTexture> emojiTexCache;
+                const float emojiCell = tune(30.0f);
+                const float emojiPad = tune(8.0f);
+                const int emojiPerRow = 8;
+                const int emojiRows = (kEmojiListCount + emojiPerRow - 1) / emojiPerRow;
+                const float itemGap = ImGui::GetStyle().ItemSpacing.x;
+                const float emojiW = emojiPad * 2.0f + emojiPerRow * emojiCell +
+                                     (emojiPerRow - 1) * itemGap;
+                const float emojiH = emojiPad * 2.0f + emojiRows * emojiCell +
+                                     (emojiRows - 1) * ImGui::GetStyle().ItemSpacing.y;
                 ImGui::SetNextWindowBgAlpha(0.96f);
                 ImGui::SetNextWindowPos(ImVec2(panelPos.x + panelSize.x - emojiW - tune(4.0f),
                                                panelPos.y + panelSize.y - emojiH - tune(4.0f)),
                                         ImGuiCond_Always);
                 ImGui::SetNextWindowSize(ImVec2(emojiW, emojiH), ImGuiCond_Always);
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(emojiPad, emojiPad));
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, tune(10.0f));
                 ImGui::Begin("Emoji", &app.showEmoji,
-                             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize);
+                             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                             ImGuiWindowFlags_AlwaysAutoResize);
                 if (ImGui::IsWindowHovered(hoverFlags))
                     uiHovered = true;
-                const int emojiCount = kEmojiListCount;
-                if (fontChat)
-                    ImGui::PushFont(fontChat);
-                for (int i = 0; i < emojiCount; ++i) {
-                    if (ImGui::Button(kEmojiList[i])) {
+                ImDrawList* edl = ImGui::GetWindowDrawList();
+                for (int i = 0; i < kEmojiListCount; ++i) {
+                    auto texIt = emojiTexCache.find(i);
+                    if (texIt == emojiTexCache.end()) {
+                        ChatTextTexture tex;
+                        RenderChatTextTexture(WideFromUtf8(kEmojiList[i]), 240.0f,
+                                              fontChat ? fontChat->FontSize : 24.0f,
+                                              ImVec4(1, 1, 1, 1), tex,
+                                              DWRITE_WORD_WRAPPING_WRAP,
+                                              nullptr, nullptr, nullptr, -1,
+                                              /*cropTight=*/true);
+                        texIt = emojiTexCache.emplace(i, std::move(tex)).first;
+                    }
+                    const ChatTextTexture& tex = texIt->second;
+                    ImGui::PushID(i);
+                    bool emojiClicked = false;
+                    if (tex.srv && tex.size.x > 0.0f && tex.size.y > 0.0f) {
+                        emojiClicked = ImGui::InvisibleButton("##emoji", ImVec2(emojiCell, emojiCell));
+                        const ImVec2 cMin = ImGui::GetItemRectMin();
+                        const ImVec2 cMax = ImGui::GetItemRectMax();
+                        if (ImGui::IsItemHovered())
+                            edl->AddRectFilled(cMin, cMax,
+                                               ImGui::GetColorU32(ImVec4(1, 1, 1, 0.10f)),
+                                               tune(6.0f));
+                        const float fit = std::min((emojiCell * 0.84f) / tex.size.x,
+                                                   (emojiCell * 0.84f) / tex.size.y);
+                        const ImVec2 half(tex.size.x * fit * 0.5f, tex.size.y * fit * 0.5f);
+                        const ImVec2 c((cMin.x + cMax.x) * 0.5f, (cMin.y + cMax.y) * 0.5f);
+                        edl->AddImage(reinterpret_cast<ImTextureID>(tex.srv),
+                                      ImVec2(c.x - half.x, c.y - half.y),
+                                      ImVec2(c.x + half.x, c.y + half.y));
+                    } else {
+                        if (fontChat)
+                            ImGui::PushFont(fontChat);
+                        emojiClicked = ImGui::Button(kEmojiList[i], ImVec2(emojiCell, emojiCell));
+                        if (fontChat)
+                            ImGui::PopFont();
+                    }
+                    if (emojiClicked) {
                         std::strncat(app.chatInput, kEmojiList[i],
                                      sizeof(app.chatInput) - std::strlen(app.chatInput) - 1);
                         app.showEmoji = false;
                     }
-                    if ((i + 1) % 8 != 0)
+                    ImGui::PopID();
+                    if ((i + 1) % emojiPerRow != 0)
                         ImGui::SameLine();
                 }
-                if (fontChat)
-                    ImGui::PopFont();
                 ImGui::End();
+                ImGui::PopStyleVar(2);
             }
     }
 }

@@ -83,6 +83,10 @@ SyncSession::SyncSession(PlaybackController* player)
     m_signalingClient.setRelayChatCallback([this](const std::string& message) {
         dispatchChat(message);
     });
+    m_signalingClient.setRelayReactionCallback([this](const std::string& emoji) {
+        if (m_reactionCallback)
+            m_reactionCallback(emoji);
+    });
     m_signalingClient.setRelayIntentCallback([this](const std::string& action, double value) {
         onRelayIntent(action, value);
     });
@@ -565,6 +569,19 @@ std::string SyncSession::hintText() const {
 
 void SyncSession::setChatCallback(ChatCallback cb) {
     m_chatCallback = std::move(cb);
+}
+
+void SyncSession::setReactionCallback(ReactionCallback cb) {
+    m_reactionCallback = std::move(cb);
+}
+
+bool SyncSession::sendReaction(const std::string& emoji) {
+    if (emoji.empty())
+        return false;
+    if (!m_signalingClient.isConnected() || !m_signalingClient.isJoined())
+        return false;
+    m_signalingClient.sendRelayReaction(emoji);
+    return true;
 }
 
 void SyncSession::setActionCallback(ActionCallback cb) {

@@ -213,6 +213,10 @@ void SignalingClient::setRelayChatCallback(RelayChatCallback cb) {
     m_relayChatCb = std::move(cb);
 }
 
+void SignalingClient::setRelayReactionCallback(RelayReactionCallback cb) {
+    m_relayReactionCb = std::move(cb);
+}
+
 void SignalingClient::setRelayIntentCallback(RelayIntentCallback cb) {
     m_relayIntentCb = std::move(cb);
 }
@@ -329,6 +333,10 @@ void SignalingClient::onTextMessage(const std::string& message) {
             std::string text = j.value("text", "");
             if (!text.empty() && m_relayChatCb)
                 m_relayChatCb(text);
+        } else if (type == "reaction") {
+            std::string emoji = j.value("emoji", "");
+            if (!emoji.empty() && emoji.size() <= 16 && m_relayReactionCb)
+                m_relayReactionCb(emoji);
         } else if (type == "intent") {
             std::string action = j.value("action", "");
             double value = j.value("value", 0.0);
@@ -445,6 +453,17 @@ void SignalingClient::sendRelayChat(const std::string& text) {
     j["type"] = "chat";
     j["code"] = m_sessionCode;
     j["text"] = text;
+    queueOrSend(j.dump());
+}
+
+void SignalingClient::sendRelayReaction(const std::string& emoji) {
+    if (emoji.empty() || emoji.size() > 16)
+        return;
+    nlohmann::json j;
+    j["type"] = "reaction";
+    j["code"] = m_sessionCode;
+    j["emoji"] = emoji;
+    // Reactions are ephemeral; drop rather than queue when disconnected.
     queueOrSend(j.dump());
 }
 

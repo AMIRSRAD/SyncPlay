@@ -30,6 +30,11 @@ extern bool g_blurReady;
 // (saves CPU on low-end systems). Toggled from the Settings > Appearance panel.
 extern bool g_glassEnabled;
 
+// Saturation-weighted average colour of the current video frame (sRGB 0..1),
+// sampled sparsely during the frame upload. Feeds the dynamic UI accent.
+extern float g_videoAccentColor[3];
+extern bool g_videoAccentValid;
+
 extern HWND g_hWnd;
 extern bool g_fullscreen;
 extern WINDOWPLACEMENT g_wpPrev;
@@ -37,6 +42,9 @@ extern DWORD g_stylePrev;
 extern DWORD g_exStylePrev;
 extern bool g_pendingToggleFullscreen;
 extern bool g_pendingTogglePlay;
+// Set by taskbar thumbnail buttons and hardware media keys.
+extern bool g_pendingPlaylistPrev;
+extern bool g_pendingPlaylistNext;
 extern bool g_pendingDrop;
 extern bool g_pendingDpiChange;
 extern unsigned int g_pendingDpiValue;
@@ -68,3 +76,9 @@ void CleanupBlurTexture();
 void EnsureBlurTexture(int w, int h);
 void ToggleFullscreen(HWND hWnd);
 void ApplyCustomWindowChrome(HWND hWnd);
+
+// Taskbar integration: progress on the taskbar icon and prev/play-pause/next
+// thumbnail buttons. Call UpdateTaskbar periodically (throttled by the caller);
+// CleanupTaskbar on shutdown.
+void UpdateTaskbar(HWND hWnd, double position, double duration, bool paused, bool hasMedia);
+void CleanupTaskbar();

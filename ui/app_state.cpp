@@ -84,6 +84,23 @@ void load_config(AppState& app, float* volume, float* speed) {
     app.allowGuestControl = j.value("allowGuestControl", app.allowGuestControl);
     app.sidePanels = j.value("sidePanels", app.sidePanels);
     app.glassPanels = j.value("glassPanels", app.glassPanels);
+    app.dynamicAccent = j.value("dynamicAccent", app.dynamicAccent);
+    if (j.contains("recentMedia") && j["recentMedia"].is_array()) {
+        app.recentMedia.clear();
+        for (const auto& e : j["recentMedia"]) {
+            if (!e.is_object())
+                continue;
+            RecentMedia r;
+            r.path = e.value("path", std::string());
+            r.position = e.value("position", 0.0);
+            r.duration = e.value("duration", 0.0);
+            r.lastWatched = e.value("lastWatched", static_cast<int64_t>(0));
+            if (!r.path.empty())
+                app.recentMedia.push_back(std::move(r));
+            if (app.recentMedia.size() >= 8)
+                break;
+        }
+    }
     app.chatPos[0] = j.value("chatPosX", app.chatPos[0]);
     app.chatPos[1] = j.value("chatPosY", app.chatPos[1]);
     app.chatSize[0] = j.value("chatSizeW", app.chatSize[0]);
@@ -151,6 +168,17 @@ void save_config(const AppState& app, float volume, float speed) {
     j["allowGuestControl"] = app.allowGuestControl;
     j["sidePanels"] = app.sidePanels;
     j["glassPanels"] = app.glassPanels;
+    j["dynamicAccent"] = app.dynamicAccent;
+    {
+        nlohmann::json recents = nlohmann::json::array();
+        for (const auto& r : app.recentMedia) {
+            recents.push_back({{"path", r.path},
+                               {"position", r.position},
+                               {"duration", r.duration},
+                               {"lastWatched", r.lastWatched}});
+        }
+        j["recentMedia"] = recents;
+    }
     j["chatPosX"] = app.chatPos[0];
     j["chatPosY"] = app.chatPos[1];
     j["chatSizeW"] = app.chatSize[0];

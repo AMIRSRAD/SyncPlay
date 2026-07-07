@@ -165,4 +165,45 @@ void update_video_texture(SwRenderState& state) {
         produce_blur(src, w, h, stride);
     else
         g_blurReady = false;
+
+    // Dominant-colour sample for the dynamic UI accent: sparse grid (every 8th
+    // pixel of every 8th row), weighted by per-pixel saturation so colourful
+    // regions dominate over grays. ~30k adds at 1080p — negligible.
+    {
+        constexpr int kStep = 8;
+        uint64_t wr = 0, wg = 0, wb = 0, wsum = 0;
+        uint64_t pr = 0, pg = 0, pb = 0, cnt = 0;
+        for (int y = 0; y < h; y += kStep) {
+            const uint32_t* row = reinterpret_cast<const uint32_t*>(src + static_cast<size_t>(y) * stride);
+            for (int x = 0; x < w; x += kStep) {
+                const uint32_t px = row[x];
+                const uint32_t b = px & 0xFF;
+                const uint32_t g = (px >> 8) & 0xFF;
+                const uint32_t r = (px >> 16) & 0xFF;
+                const uint32_t mx = std::max(r, std::max(g, b));
+                const uint32_t mn = std::min(r, std::min(g, b));
+                const uint32_t sat = mx - mn;
+                wr += static_cast<uint64_t>(r) * sat;
+                wg += static_cast<uint64_t>(g) * sat;
+                wb += static_cast<uint64_t>(b) * sat;
+                wsum += sat;
+                pr += r; pg += g; pb += b;
+                ++cnt;
+            }
+        }
+        if (cnt > 0) {
+            // Fall back to the plain average when there is almost no colour
+            // signal (near-grayscale frame), instead of amplifying noise.
+            if (wsum > cnt * 8) {
+                g_videoAccentColor[0] = static_cast<float>(wr) / (static_cast<float>(wsum) * 255.0f);
+                g_videoAccentColor[1] = static_cast<float>(wg) / (static_cast<float>(wsum) * 255.0f);
+                g_videoAccentColor[2] = static_cast<float>(wb) / (static_cast<float>(wsum) * 255.0f);
+            } else {
+                g_videoAccentColor[0] = static_cast<float>(pr) / (static_cast<float>(cnt) * 255.0f);
+                g_videoAccentColor[1] = static_cast<float>(pg) / (static_cast<float>(cnt) * 255.0f);
+                g_videoAccentColor[2] = static_cast<float>(pb) / (static_cast<float>(cnt) * 255.0f);
+            }
+            g_videoAccentValid = true;
+        }
+    }
 }

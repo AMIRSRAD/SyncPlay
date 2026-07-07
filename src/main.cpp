@@ -255,7 +255,7 @@ bool RenderChatTextTexture(const std::wstring& text, float wrapWidth, float font
                            const ImVec4& color, ChatTextTexture& out,
                            DWRITE_WORD_WRAPPING wrapping,
                            float* outCaretX, float* outCaretY,
-                           float* outCaretH, int caretPos) {
+                           float* outCaretH, int caretPos, bool cropTight) {
     using Microsoft::WRL::ComPtr;
     static ComPtr<IDWriteFactory> dwriteFactory;
     static ComPtr<ID2D1Factory> d2dFactory;
@@ -368,10 +368,10 @@ bool RenderChatTextTexture(const std::wstring& text, float wrapWidth, float font
 
     rt->BeginDraw();
     rt->Clear(D2D1::ColorF(0, 0, 0, 0));
-    D2D1_DRAW_TEXT_OPTIONS options = D2D1_DRAW_TEXT_OPTIONS_NONE;
-#ifdef D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT
-    options = static_cast<D2D1_DRAW_TEXT_OPTIONS>(options | D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
-#endif
+    // ENABLE_COLOR_FONT is an enum constant, not a macro — guarding it with
+    // #ifdef silently disabled it and left all emoji rendering as monochrome
+    // outlines. Enable it directly (Windows 8.1+ D2D, always present here).
+    const D2D1_DRAW_TEXT_OPTIONS options = D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT;
     rt->DrawTextLayout(D2D1::Point2F(originX, originY), layout.Get(), brush.Get(), options);
     if (FAILED(rt->EndDraw()))
         return false;
@@ -400,10 +400,45 @@ bool RenderChatTextTexture(const std::wstring& text, float wrapWidth, float font
         }
     }
 
+    // Tight crop: trim to the pixels actually covered by glyphs so that
+    // centring the texture centres the artwork (emoji layout boxes include
+    // baseline/advance padding that otherwise skews placement).
+    UINT outW = width;
+    UINT outH = height;
+    const uint8_t* uploadPixels = pixels.data();
+    std::vector<uint8_t> cropped;
+    if (cropTight) {
+        UINT minX = width, minY = height, maxX = 0, maxY = 0;
+        bool any = false;
+        for (UINT yy = 0; yy < height; ++yy) {
+            const uint8_t* row = pixels.data() + static_cast<size_t>(yy) * stride;
+            for (UINT xx = 0; xx < width; ++xx) {
+                if (row[xx * 4 + 3] > 8) {
+                    minX = std::min(minX, xx);
+                    minY = std::min(minY, yy);
+                    maxX = std::max(maxX, xx);
+                    maxY = std::max(maxY, yy);
+                    any = true;
+                }
+            }
+        }
+        if (any && maxX >= minX && maxY >= minY) {
+            outW = maxX - minX + 1;
+            outH = maxY - minY + 1;
+            cropped.resize(static_cast<size_t>(outW) * outH * 4);
+            for (UINT yy = 0; yy < outH; ++yy) {
+                std::memcpy(cropped.data() + static_cast<size_t>(yy) * outW * 4,
+                            pixels.data() + static_cast<size_t>(minY + yy) * stride + static_cast<size_t>(minX) * 4,
+                            static_cast<size_t>(outW) * 4);
+            }
+            uploadPixels = cropped.data();
+        }
+    }
+
     ReleaseChatTexture(out);
-    if (!CreateTextureFromBGRA(pixels.data(), width, height, &out.srv))
+    if (!CreateTextureFromBGRA(uploadPixels, outW, outH, &out.srv))
         return false;
-    out.size = ImVec2(static_cast<float>(width), static_cast<float>(height));
+    out.size = ImVec2(static_cast<float>(outW), static_cast<float>(outH));
     if (outCaretX)
         *outCaretX = caretX;
     if (outCaretY)
@@ -698,9 +733,126 @@ private:
     mpv_handle* m_mpv = nullptr;
 };
 
-int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int) {
+namespace {
+// syncplay:// invite links -----------------------------------------------
+
+std::string UrlDecodeComponent(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (size_t i = 0; i < in.size(); ++i) {
+        if (in[i] == '%' && i + 2 < in.size()) {
+            const auto hex = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return -1;
+            };
+            const int hi = hex(in[i + 1]);
+            const int lo = hex(in[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(in[i] == '+' ? ' ' : in[i]);
+    }
+    return out;
+}
+
+std::string UrlEncodeComponent(const std::string& in) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(in.size() * 3);
+    for (unsigned char c : in) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
+            out.push_back(static_cast<char>(c));
+        else {
+            out.push_back('%');
+            out.push_back(hex[c >> 4]);
+            out.push_back(hex[c & 15]);
+        }
+    }
+    return out;
+}
+
+// Parse "syncplay://join?url=...&code=..." (accepts an optional trailing slash
+// after join). Returns false if the string is not a syncplay join link.
+bool ParseSyncplayLink(const std::string& link, std::string& outUrl, std::string& outCode) {
+    const std::string prefix = "syncplay://join";
+    if (link.rfind(prefix, 0) != 0)
+        return false;
+    const size_t q = link.find('?');
+    if (q == std::string::npos)
+        return false;
+    std::string query = link.substr(q + 1);
+    while (!query.empty() && (query.back() == '/' || query.back() == '\r' || query.back() == '\n'))
+        query.pop_back();
+    size_t start = 0;
+    while (start < query.size()) {
+        size_t amp = query.find('&', start);
+        if (amp == std::string::npos)
+            amp = query.size();
+        const std::string kv = query.substr(start, amp - start);
+        const size_t eq = kv.find('=');
+        if (eq != std::string::npos) {
+            const std::string key = kv.substr(0, eq);
+            const std::string value = UrlDecodeComponent(kv.substr(eq + 1));
+            if (key == "url")
+                outUrl = value;
+            else if (key == "code")
+                outCode = value;
+        }
+        start = amp + 1;
+    }
+    return !outCode.empty();
+}
+
+// Register syncplay:// for the current user (idempotent, no admin needed), so
+// clicking an invite link opens the app. The installer also registers it
+// system-wide; this covers portable/dev runs.
+void RegisterSyncplayProtocol() {
+    wchar_t exePath[MAX_PATH]{};
+    if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0)
+        return;
+    const std::wstring command = L"\"" + std::wstring(exePath) + L"\" \"%1\"";
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\syncplay", 0, nullptr, 0,
+                        KEY_WRITE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
+        const wchar_t* desc = L"URL:SyncPlay Session Link";
+        RegSetValueExW(key, nullptr, 0, REG_SZ, reinterpret_cast<const BYTE*>(desc),
+                       static_cast<DWORD>((wcslen(desc) + 1) * sizeof(wchar_t)));
+        RegSetValueExW(key, L"URL Protocol", 0, REG_SZ, reinterpret_cast<const BYTE*>(L""),
+                       sizeof(wchar_t));
+        RegCloseKey(key);
+    }
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\syncplay\\shell\\open\\command",
+                        0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
+        RegSetValueExW(key, nullptr, 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(command.c_str()),
+                       static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(key);
+    }
+}
+} // namespace
+
+int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lpCmdLine, _In_ int) {
     InstallCrashHandler();
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    RegisterSyncplayProtocol();
+    // A syncplay:// invite link on the command line triggers an auto-join once
+    // the session machinery is up.
+    std::string pendingJoinUrl;
+    std::string pendingJoinCode;
+    if (lpCmdLine && lpCmdLine[0]) {
+        std::string cmd = Utf8FromWide(lpCmdLine);
+        // Strip surrounding quotes if the shell passed the URL quoted.
+        while (!cmd.empty() && (cmd.front() == '"' || cmd.front() == ' '))
+            cmd.erase(cmd.begin());
+        while (!cmd.empty() && (cmd.back() == '"' || cmd.back() == ' '))
+            cmd.pop_back();
+        ParseSyncplayLink(cmd, pendingJoinUrl, pendingJoinCode);
+    }
     const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const bool comInited = (comHr == S_OK || comHr == S_FALSE);
     const auto loadIconSize = [&](UINT targetSize) -> HICON {
@@ -903,6 +1055,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             0xE72A, 0xE72B, // forward/rewind
             0xE73F, 0xE740, // window/fullscreen
             0xE74F, 0xE74F, // mute
+            0xE76E, 0xE76E, // emoji (reactions)
             0xE767, 0xE769, // volume/play/pause
             0xE77A, 0xE77A, // unpin
             0xE7C2, 0xE7C2, // resize
@@ -1176,6 +1329,43 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     std::string timelineFileStatus = session.fileVerificationMessage();
     std::string timelineVoiceState = session.voiceState();
 
+    // Floating emoji reactions: spawned locally on click and remotely via the
+    // relay; drawn over the video and gone in ~2.6s. Textures are rendered
+    // through the D2D chat-text path so they are full-colour emoji.
+    struct ActiveReaction {
+        std::string emoji;
+        double start = 0.0;
+        float xFrac = 0.5f;  // horizontal spawn position (fraction of view width)
+        float drift = 0.0f;  // per-reaction lateral drift / wobble phase
+    };
+    static std::deque<ActiveReaction> activeReactions;
+    static std::unordered_map<std::string, ChatTextTexture> reactionTexCache;
+    static uint32_t reactionSeed = 1u;
+    auto spawnReaction = [&](const std::string& emoji) {
+        reactionSeed = reactionSeed * 1664525u + 1013904223u;
+        const float fx = 0.72f + static_cast<float>(reactionSeed % 1000u) / 1000.0f * 0.20f;
+        reactionSeed = reactionSeed * 1664525u + 1013904223u;
+        const float dr = static_cast<float>(reactionSeed % 1000u) / 1000.0f - 0.5f;
+        activeReactions.push_back({emoji, ImGui::GetTime(), fx, dr});
+        if (activeReactions.size() > 24)
+            activeReactions.pop_front();
+    };
+    auto getReactionTex = [&](const std::string& emoji) -> ChatTextTexture* {
+        auto it = reactionTexCache.find(emoji);
+        if (it == reactionTexCache.end()) {
+            ChatTextTexture tex;
+            RenderChatTextTexture(WideFromUtf8(emoji), 240.0f, 48.0f * dpiScale,
+                                  ImVec4(1, 1, 1, 1), tex,
+                                  DWRITE_WORD_WRAPPING_WRAP, nullptr, nullptr, nullptr, -1,
+                                  /*cropTight=*/true);
+            it = reactionTexCache.emplace(emoji, std::move(tex)).first;
+        }
+        return &it->second;
+    };
+    session.setReactionCallback([&](const std::string& emoji) {
+        spawnReaction(emoji);
+    });
+
     session.setChatCallback([&app](const std::string& text) {
         const std::string stamp = ChatTimestamp();
         if (text.rfind("FILE|", 0) == 0) {
@@ -1423,6 +1613,34 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         ShellExecuteW(nullptr, L"open", wide.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     };
 
+    // Maintain the "Continue watching" list: move/insert `path` at the front
+    // with its latest position. Called on file load and every few seconds of
+    // playback (alongside the watch-later save).
+    auto updateRecentMedia = [&](const std::string& path, double position, double duration) {
+        if (path.empty())
+            return;
+        const int64_t nowTs = std::chrono::duration_cast<std::chrono::seconds>(
+                                  std::chrono::system_clock::now().time_since_epoch())
+                                  .count();
+        auto it = std::find_if(app.recentMedia.begin(), app.recentMedia.end(),
+                               [&](const RecentMedia& r) { return r.path == path; });
+        if (it != app.recentMedia.end()) {
+            RecentMedia r = *it;
+            r.position = position;
+            if (duration > 0.0)
+                r.duration = duration;
+            r.lastWatched = nowTs;
+            app.recentMedia.erase(it);
+            app.recentMedia.insert(app.recentMedia.begin(), std::move(r));
+        } else {
+            app.recentMedia.insert(app.recentMedia.begin(),
+                                   RecentMedia{path, position, duration, nowTs});
+            if (app.recentMedia.size() > 8)
+                app.recentMedia.resize(8);
+        }
+        app.dirty = true;
+    };
+
     auto browseShareFile = [&]() {
         const std::wstring path = openFileDialog(g_hWnd, L"All Files\0*.*\0", L"Share File");
         if (!path.empty()) {
@@ -1623,10 +1841,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
 
     int argcW = 0;
     LPWSTR* argvW = CommandLineToArgvW(GetCommandLineW(), &argcW);
-    if (argvW && argcW > 1 && argvW[1] && argvW[1][0] != L'\0') {
+    // A syncplay:// invite link is handled below, not treated as a media path.
+    if (argvW && argcW > 1 && argvW[1] && argvW[1][0] != L'\0' && pendingJoinCode.empty()) {
         const std::wstring pathW = argvW[1];
         const std::string pathUtf8 = Utf8FromWide(pathW);
-        if (!pathUtf8.empty()) {
+        if (!pathUtf8.empty() && pathUtf8.rfind("syncplay://", 0) != 0) {
             const char* cmd[] = { "loadfile", pathUtf8.c_str(), nullptr };
             mpv_command(mpv, cmd);
             setLocalFileWide(pathW);
@@ -1635,6 +1854,22 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     }
     if (argvW)
         LocalFree(argvW);
+
+    // Invite-link auto-join: connect as guest to the linked session.
+    if (!pendingJoinCode.empty()) {
+        const std::string joinUrl = pendingJoinUrl.empty()
+                                        ? std::string(app.serverUrl)
+                                        : pendingJoinUrl;
+        if (!joinUrl.empty()) {
+            std::snprintf(app.serverUrl, sizeof(app.serverUrl), "%s", joinUrl.c_str());
+            std::snprintf(app.joinCode, sizeof(app.joinCode), "%s", pendingJoinCode.c_str());
+            session.joinSession(joinUrl, pendingJoinCode);
+            app.showSession = true;
+            app.events.push_back({"Joining session " + pendingJoinCode, 3.0f});
+        } else {
+            app.events.push_back({"Invite link has no server URL", 3.0f});
+        }
+    }
 
     MSG msg;
     ZeroMemory(&msg, sizeof(msg));
@@ -1663,6 +1898,22 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         if (g_pendingTogglePlay) {
             togglePlay();
             g_pendingTogglePlay = false;
+        }
+        if (g_pendingPlaylistPrev) {
+            g_pendingPlaylistPrev = false;
+            if (playlistCount > 0 && playlistPos > 0) {
+                const char* cmd[] = { "playlist-prev", nullptr };
+                mpv_command(mpv, cmd);
+                app.events.push_back({"Previous item", 1.5f});
+            }
+        }
+        if (g_pendingPlaylistNext) {
+            g_pendingPlaylistNext = false;
+            if (playlistCount > 0 && playlistPos + 1 < playlistCount) {
+                const char* cmd[] = { "playlist-next", nullptr };
+                mpv_command(mpv, cmd);
+                app.events.push_back({"Next item", 1.5f});
+            }
         }
 
         if (g_pendingDpiChange) {
@@ -1707,6 +1958,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
                 const double resumedAt = mpv_get_double(mpv, "time-pos", 0.0);
                 if (resumedAt > 5.0)
                     app.events.push_back({"Resumed from " + format_time(resumedAt), 2.5f});
+                char* loadedPath = mpv_get_property_string(mpv, "path");
+                if (loadedPath) {
+                    updateRecentMedia(loadedPath, resumedAt, mpv_get_double(mpv, "duration", 0.0));
+                    mpv_free(loadedPath);
+                }
             }
         }
 
@@ -1726,6 +1982,17 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             }
         }
 
+        // Taskbar icon progress + play/pause thumb button, throttled.
+        {
+            static auto lastTaskbar = std::chrono::steady_clock::now();
+            const auto nowTb = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(nowTb - lastTaskbar).count() >= 250) {
+                UpdateTaskbar(g_hWnd, position, duration, paused,
+                              playlistCount > 0 || duration > 0.01);
+                lastTaskbar = nowTb;
+            }
+        }
+
         // Persist the watch-later position every few seconds while media is
         // loaded, so resume survives crashes and mid-session file switches (not
         // just clean quits).
@@ -1736,6 +2003,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
                 std::chrono::duration_cast<std::chrono::seconds>(nowWl - lastWatchLater).count() >= 5) {
                 const char* wlCmd[] = {"write-watch-later-config", nullptr};
                 mpv_command_async(mpv, 0, wlCmd);
+                char* curPath = mpv_get_property_string(mpv, "path");
+                if (curPath) {
+                    updateRecentMedia(curPath, position, duration);
+                    mpv_free(curPath);
+                }
                 lastWatchLater = nowWl;
             }
         }
@@ -1922,6 +2194,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         static const std::string ICON_SPEED = Utf8FromCodepoint(0xE823);
         static const std::string ICON_ASPECT = Utf8FromCodepoint(0xE7C2);
         static const std::string ICON_PLAYLIST = Utf8FromCodepoint(0xE8BC);
+        static const std::string ICON_REACT = Utf8FromCodepoint(0xE76E);
         static const std::string ICON_MINIMIZE = Utf8FromCodepoint(0xE921);
         static const std::string ICON_MAXIMIZE = Utf8FromCodepoint(0xE922);
         static const std::string ICON_RESTORE = Utf8FromCodepoint(0xE923);
@@ -1939,6 +2212,138 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         const ImGuiHoveredFlags hoverFlags = ImGuiHoveredFlags_AllowWhenBlockedByActiveItem;
         bool uiHovered = false;
         bool panelRectHovered = false;
+
+        // "Continue watching": resume cards on the idle screen, built from the
+        // persisted recent-media list. Refreshed every ~2s (existence checks).
+        if (!hasMedia && uiFade > 0.01f && !app.recentMedia.empty()) {
+            static std::vector<size_t> idleResume;
+            static double lastIdleScan = -10.0;
+            const double nowT = ImGui::GetTime();
+            if (nowT - lastIdleScan > 2.0) {
+                lastIdleScan = nowT;
+                idleResume.clear();
+                for (size_t ri = 0; ri < app.recentMedia.size() && idleResume.size() < 4; ++ri) {
+                    const RecentMedia& r = app.recentMedia[ri];
+                    if (r.position < 30.0)
+                        continue; // barely started; not worth a card
+                    if (r.duration > 0.0 && r.position > r.duration * 0.97)
+                        continue; // effectively finished
+                    std::error_code ec;
+                    if (!std::filesystem::exists(std::filesystem::path(WideFromUtf8(r.path)), ec))
+                        continue;
+                    idleResume.push_back(ri);
+                }
+            }
+            if (!idleResume.empty()) {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                ImFont* cardFont = fontChat ? fontChat : ImGui::GetFont();
+                const float cardW = std::min(tune(380.0f), static_cast<float>(ui_w) - tune(48.0f));
+                const float cardH = tune(62.0f);
+                const float cardGap = tune(10.0f);
+                const float cardX = (static_cast<float>(ui_w) - cardW) * 0.5f;
+                float cardY = static_cast<float>(ui_h) * 0.5f + tune(118.0f);
+                const char* cwHeader = "Continue watching";
+                const ImVec2 cwSize = ImGui::CalcTextSize(cwHeader);
+                dl->AddText(ImVec2((static_cast<float>(ui_w) - cwSize.x) * 0.5f,
+                                   cardY - cwSize.y - tune(10.0f)),
+                            ImGui::GetColorU32(ImVec4(0.66f, 0.69f, 0.74f, 0.85f)), cwHeader);
+                for (size_t k = 0; k < idleResume.size(); ++k) {
+                    if (idleResume[k] >= app.recentMedia.size())
+                        continue;
+                    if (cardY + cardH > static_cast<float>(ui_h) - tune(90.0f))
+                        break; // keep clear of the control bar on short windows
+                    const RecentMedia& r = app.recentMedia[idleResume[k]];
+                    ImGui::SetCursorPos(ImVec2(cardX, cardY));
+                    ImGui::PushID(static_cast<int>(k));
+                    const bool cardClicked = ImGui::InvisibleButton("ResumeCard", ImVec2(cardW, cardH));
+                    const bool cardHover = ImGui::IsItemHovered();
+                    if (cardHover) {
+                        uiHovered = true;
+                        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    }
+                    const ImVec2 mn = ImGui::GetItemRectMin();
+                    const ImVec2 mx = ImGui::GetItemRectMax();
+                    dl->AddRectFilled(mn, mx,
+                                      ImGui::GetColorU32(ImVec4(1, 1, 1, cardHover ? 0.14f : 0.07f)),
+                                      tune(10.0f));
+                    dl->AddRect(mn, mx, ImGui::GetColorU32(ImVec4(1, 1, 1, 0.10f)), tune(10.0f));
+                    const float padX = tune(14.0f);
+                    const std::wstring widePath = WideFromUtf8(r.path);
+                    const std::string title =
+                        Utf8FromWide(std::filesystem::path(widePath).stem().wstring());
+                    dl->PushClipRect(ImVec2(mn.x + padX, mn.y), ImVec2(mx.x - padX, mx.y), true);
+                    dl->AddText(cardFont, cardFont->FontSize,
+                                ImVec2(mn.x + padX, mn.y + tune(8.0f)),
+                                ImGui::GetColorU32(ImGuiCol_Text), title.c_str());
+                    dl->PopClipRect();
+                    std::string remain;
+                    if (r.duration > 0.0)
+                        remain = format_time(std::max(0.0, r.duration - r.position)) + " left";
+                    else
+                        remain = "at " + format_time(r.position);
+                    dl->AddText(ImVec2(mn.x + padX, mn.y + tune(8.0f) + ImGui::GetTextLineHeight() + tune(2.0f)),
+                                ImGui::GetColorU32(ImVec4(0.66f, 0.69f, 0.74f, 0.9f)), remain.c_str());
+                    // Accent progress bar near the card's bottom, with clear padding
+                    // below so it doesn't hug the border.
+                    const float barY = mx.y - tune(13.0f);
+                    const float barW = cardW - padX * 2.0f;
+                    const float frac = r.duration > 0.0
+                                           ? std::clamp(static_cast<float>(r.position / r.duration), 0.0f, 1.0f)
+                                           : 0.0f;
+                    dl->AddRectFilled(ImVec2(mn.x + padX, barY),
+                                      ImVec2(mn.x + padX + barW, barY + tune(3.0f)),
+                                      ImGui::GetColorU32(ImVec4(1, 1, 1, 0.12f)), tune(1.5f));
+                    if (frac > 0.0f)
+                        dl->AddRectFilled(ImVec2(mn.x + padX, barY),
+                                          ImVec2(mn.x + padX + barW * frac, barY + tune(3.0f)),
+                                          ImGui::GetColorU32(ImGuiCol_CheckMark), tune(1.5f));
+                    if (cardClicked) {
+                        const std::string pathUtf8 = r.path;
+                        const char* cmd[] = { "loadfile", pathUtf8.c_str(), nullptr };
+                        mpv_command(mpv, cmd);
+                        setLocalFileWide(widePath);
+                        resetScrubState();
+                        lastIdleScan = -10.0; // list will reshuffle on load
+                    }
+                    ImGui::PopID();
+                    cardY += cardH + cardGap;
+                }
+            }
+        }
+
+        // Floating emoji reactions: pop in, rise with a gentle wobble, fade out.
+        if (!activeReactions.empty()) {
+            ImDrawList* rdl = ImGui::GetWindowDrawList();
+            const double nowR = ImGui::GetTime();
+            const float durR = 2.6f;
+            for (const auto& r : activeReactions) {
+                const float p = static_cast<float>((nowR - r.start) / durR);
+                if (p < 0.0f || p > 1.0f)
+                    continue;
+                const ChatTextTexture* tex = getReactionTex(r.emoji);
+                if (!tex || !tex->srv)
+                    continue;
+                float scale = 1.0f;
+                if (p < 0.12f)
+                    scale = 0.5f + (p / 0.12f) * 0.65f; // pop 0.5 -> 1.15
+                else if (p < 0.22f)
+                    scale = 1.15f - ((p - 0.12f) / 0.10f) * 0.15f; // settle to 1.0
+                float alpha = 1.0f;
+                if (p > 0.70f)
+                    alpha = 1.0f - (p - 0.70f) / 0.30f;
+                const float rise = p * tune(240.0f);
+                const float wob = std::sin(p * 6.0f + r.drift * 6.28f) * tune(12.0f) * (0.3f + p);
+                const float cx = viewW * r.xFrac + wob + r.drift * tune(34.0f) * p;
+                const float cy = static_cast<float>(ui_h) - barHeightUi - tune(56.0f) - rise;
+                const ImVec2 half(tex->size.x * 0.5f * scale, tex->size.y * 0.5f * scale);
+                rdl->AddImage(reinterpret_cast<ImTextureID>(tex->srv),
+                              ImVec2(cx - half.x, cy - half.y), ImVec2(cx + half.x, cy + half.y),
+                              ImVec2(0, 0), ImVec2(1, 1),
+                              IM_COL32(255, 255, 255, static_cast<int>(alpha * 255.0f)));
+            }
+            while (!activeReactions.empty() && (nowR - activeReactions.front().start) > durR)
+                activeReactions.pop_front();
+        }
         ImVec2 nextPanelHeaderMin(0.0f, 0.0f);
         ImVec2 nextPanelHeaderMax(0.0f, 0.0f);
         bool nextPanelHeaderValid = false;
@@ -2139,16 +2544,35 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         bottomAlpha = smoothStep(bottomAlpha, bottomTarget, 0.06f, 0.025f);
         dockAlpha = smoothStep(dockAlpha, dockTarget, 0.05f, 0.02f);
 
-        // Eased accent: glide the live theme accent toward the user's chosen colour
-        // instead of snapping, so changes in Settings (and Reset) animate.
+        // Eased accent. Two sources:
+        //  - Dynamic (default): the video's dominant colour, normalized into a
+        //    readable saturation/brightness band, drifting slowly so the whole
+        //    UI breathes with the film's palette.
+        //  - Manual: the user's chosen colour (also used when there is no media
+        //    or the frame is essentially grayscale).
         static float curAccent[3] = { app.accentColor[0], app.accentColor[1], app.accentColor[2] };
         {
-            const float ease = 1.0f - std::exp(-dt / 0.14f);
+            float target[3] = { app.accentColor[0], app.accentColor[1], app.accentColor[2] };
+            bool dynamicActive = false;
+            if (app.dynamicAccent && g_videoAccentValid && hasMedia) {
+                float hue = 0.0f, sat = 0.0f, val = 0.0f;
+                ImGui::ColorConvertRGBtoHSV(g_videoAccentColor[0], g_videoAccentColor[1],
+                                            g_videoAccentColor[2], hue, sat, val);
+                if (sat > 0.06f) { // enough colour to be meaningful
+                    sat = std::clamp(sat, 0.45f, 0.80f);
+                    val = std::clamp(val, 0.70f, 0.95f);
+                    ImGui::ColorConvertHSVtoRGB(hue, sat, val, target[0], target[1], target[2]);
+                    dynamicActive = true;
+                }
+            }
+            // Manual changes snap quickly; the video tint drifts over ~2s.
+            const float tau = dynamicActive ? 2.0f : 0.14f;
+            const float ease = 1.0f - std::exp(-dt / tau);
             bool changed = false;
             for (int i = 0; i < 3; ++i) {
-                const float d = app.accentColor[i] - curAccent[i];
+                const float d = target[i] - curAccent[i];
                 if (std::fabs(d) > 0.0008f) { curAccent[i] += d * ease; changed = true; }
-                else { curAccent[i] = app.accentColor[i]; }
+                else { curAccent[i] = target[i]; }
             }
             if (changed)
                 applyAccent(curAccent);
@@ -2385,8 +2809,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         const float timelineH = tune(16.0f);
         const float textH = ImGui::GetTextLineHeight();
         const float rowY = ImGui::GetCursorPosY() + bottomRowOffset;
+        // Extra headroom for the playhead glow: the timeline row and its two time
+        // labels sit a few px lower, while the transport row below keeps its
+        // original anchor (computed from rowY), so nothing else shifts.
+        const float tlDrop = tune(3.0f);
 
-        ImGui::SetCursorPos(ImVec2(ImGui::GetCursorPosX(), rowY));
+        ImGui::SetCursorPos(ImVec2(ImGui::GetCursorPosX(), rowY + tlDrop));
         if (!hasMedia)
             ImGui::BeginDisabled();
         ImGui::InvisibleButton("##timeline", ImVec2(avail, timelineH));
@@ -2400,7 +2828,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             ImGui::EndDisabled();
         const float tlWidth = std::max(1.0f, tlMax.x - tlMin.x);
         const float centerY = (tlMin.y + tlMax.y) * 0.5f;
-        const float trackThickness = std::max(3.0f, tune(5.0f));
         const float progress = std::clamp(scrubPos / maxPos, 0.0f, 1.0f);
         if (sliderActive) {
             if (io.KeyShift) {
@@ -2413,13 +2840,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
                 scrubPos = t * maxPos;
             }
         }
-            if (sliderHovered) {
-                float t = (ImGui::GetIO().MousePos.x - tlMin.x) / tlWidth;
-                t = std::clamp(t, 0.0f, 1.0f);
-                const std::string hoverTime = format_time(t * maxPos);
-                ShowDelayedTooltip(hoverTime.c_str());
-            }
+        // Eased hover emphasis: the whole track thickens and the knob grows while
+        // the pointer is on the timeline (or scrubbing), instead of a hard toggle.
+        static float tlHoverAnim = 0.0f;
+        {
+            const float target = (sliderHovered || sliderActive) ? 1.0f : 0.0f;
+            tlHoverAnim += (target - tlHoverAnim) * (1.0f - std::exp(-dt / 0.07f));
+            tlHoverAnim = std::clamp(tlHoverAnim, 0.0f, 1.0f);
+        }
         ImDrawList* dl = ImGui::GetWindowDrawList();
+        const float trackThickness = std::max(3.0f, tune(5.0f)) + tlHoverAnim * tune(2.5f);
         const ImU32 trackCol = ImGui::GetColorU32(hasMedia
                                                       ? ImVec4(0.30f, 0.34f, 0.40f, 0.65f)
                                                       : ImVec4(0.24f, 0.27f, 0.32f, 0.34f));
@@ -2432,26 +2862,99 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         const float trackHalf = trackThickness * 0.5f;
         const float fillX = tlMin.x + tlWidth * progress;
         const bool showSyncDot = session.sessionActive() && session.transportConnected();
-        if (sliderHovered) {
-            const ImU32 glowCol = ImGui::GetColorU32(ImVec4(0.30f, 0.70f, 0.95f, 0.18f));
+        if (tlHoverAnim > 0.01f) {
+            ImVec4 glow = mediaFill;
+            glow.w = 0.16f * tlHoverAnim;
             dl->AddRectFilled(ImVec2(tlMin.x - tune(1.0f), centerY - (trackHalf + tune(2.0f))),
                               ImVec2(tlMax.x + tune(1.0f), centerY + (trackHalf + tune(2.0f))),
-                              glowCol, trackHalf + tune(2.0f));
+                              ImGui::GetColorU32(glow), trackHalf + tune(2.0f));
         }
         dl->AddRectFilled(ImVec2(tlMin.x, centerY - trackHalf),
                           ImVec2(tlMax.x, centerY + trackHalf),
                           trackCol, trackHalf);
-        dl->AddRectFilled(ImVec2(tlMin.x, centerY - trackHalf),
-                          ImVec2(fillX, centerY + trackHalf),
-                          fillCol, trackHalf);
-        const float knobR = tune(8.0f);
+        // Accent fill with a subtle horizontal gradient: darker at the start,
+        // brightest at the playhead. Rounded caps come from the base fill; the
+        // gradient strip is inset past the rounding so it never crosses a corner.
+        {
+            ImVec4 darkFill = mediaFill;
+            darkFill.x *= 0.72f;
+            darkFill.y *= 0.72f;
+            darkFill.z *= 0.72f;
+            dl->AddRectFilled(ImVec2(tlMin.x, centerY - trackHalf),
+                              ImVec2(fillX, centerY + trackHalf),
+                              ImGui::GetColorU32(darkFill), trackHalf);
+            const float inset = trackHalf;
+            if (fillX - inset > tlMin.x + inset) {
+                ImVec4 brightFill = mediaFill;
+                brightFill.x = std::min(1.0f, brightFill.x * 1.18f + 0.04f);
+                brightFill.y = std::min(1.0f, brightFill.y * 1.18f + 0.04f);
+                brightFill.z = std::min(1.0f, brightFill.z * 1.18f + 0.04f);
+                dl->AddRectFilledMultiColor(ImVec2(tlMin.x + inset, centerY - trackHalf),
+                                            ImVec2(fillX - inset, centerY + trackHalf),
+                                            ImGui::GetColorU32(darkFill),
+                                            ImGui::GetColorU32(brightFill),
+                                            ImGui::GetColorU32(brightFill),
+                                            ImGui::GetColorU32(darkFill));
+            }
+        }
+        // Soft radial glow behind the playhead knob. The halo radius is capped by
+        // the distance to the control bar's edges so the circle always fits inside
+        // and is never clipped flat at a boundary.
+        const float knobR = tune(6.5f) + tlHoverAnim * tune(2.5f);
+        if (hasMedia) {
+            const ImVec2 barMin = ImGui::GetWindowPos();
+            const ImVec2 barSize = ImGui::GetWindowSize();
+            float haloR = knobR * 2.1f;
+            haloR = std::min(haloR, centerY - barMin.y - 1.0f);
+            haloR = std::min(haloR, barMin.y + barSize.y - centerY - 1.0f);
+            haloR = std::min(haloR, fillX - barMin.x - 1.0f);
+            haloR = std::min(haloR, barMin.x + barSize.x - fillX - 1.0f);
+            if (haloR > knobR * 1.05f) {
+                ImVec4 halo = mediaFill;
+                halo.w = 0.10f + 0.10f * tlHoverAnim;
+                dl->AddCircleFilled(ImVec2(fillX, centerY), haloR,
+                                    ImGui::GetColorU32(halo), 24);
+                halo.w = 0.16f + 0.12f * tlHoverAnim;
+                dl->AddCircleFilled(ImVec2(fillX, centerY),
+                                    std::min(knobR * 1.45f, haloR * 0.75f),
+                                    ImGui::GetColorU32(halo), 24);
+            }
+        }
         dl->AddCircleFilled(ImVec2(fillX, centerY), knobR, knobCol, 20);
         if (showSyncDot) {
             dl->AddCircleFilled(ImVec2(fillX, centerY), std::max(2.5f, knobR * 0.50f),
                                 ImGui::GetColorU32(ImVec4(0.0f, 0.0f, 0.0f, 0.75f)), 12);
         }
+        // Hover time bubble: instant rounded chip above the cursor position (the
+        // playhead while scrubbing), replacing the old delayed square tooltip.
+        if (tlHoverAnim > 0.05f && hasMedia && (sliderHovered || sliderActive)) {
+            float t = sliderActive ? progress
+                                   : std::clamp((io.MousePos.x - tlMin.x) / tlWidth, 0.0f, 1.0f);
+            const std::string bubbleTime = format_time(t * maxPos);
+            const ImVec2 btSize = ImGui::CalcTextSize(bubbleTime.c_str());
+            const ImVec2 bPad(tune(8.0f), tune(4.0f));
+            const float bx = std::clamp(tlMin.x + tlWidth * t,
+                                        tlMin.x + btSize.x * 0.5f + bPad.x,
+                                        tlMax.x - btSize.x * 0.5f - bPad.x);
+            const float byBottom = tlMin.y - tune(6.0f);
+            const ImVec2 bMin(bx - btSize.x * 0.5f - bPad.x,
+                              byBottom - btSize.y - bPad.y * 2.0f);
+            const ImVec2 bMax(bx + btSize.x * 0.5f + bPad.x, byBottom);
+            // Foreground list: the bubble floats above the control bar's child
+            // window, which would otherwise clip it at its top edge.
+            ImDrawList* fdl = ImGui::GetForegroundDrawList();
+            const float bAlpha = tlHoverAnim;
+            fdl->AddRectFilled(bMin, bMax,
+                               ImGui::ColorConvertFloat4ToU32(ImVec4(0.09f, 0.10f, 0.13f, 0.95f * bAlpha)),
+                               tune(6.0f));
+            fdl->AddRect(bMin, bMax,
+                         ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, 0.14f * bAlpha)), tune(6.0f));
+            fdl->AddText(ImVec2(bMin.x + bPad.x, bMin.y + bPad.y),
+                         ImGui::ColorConvertFloat4ToU32(ImVec4(0.94f, 0.95f, 0.97f, 0.96f * bAlpha)),
+                         bubbleTime.c_str());
+        }
 
-        ImGui::SetCursorPos(ImVec2(ImGui::GetCursorPosX(), rowY + timelineH + tune(2.0f)));
+        ImGui::SetCursorPos(ImVec2(ImGui::GetCursorPosX(), rowY + tlDrop + timelineH + tune(2.0f)));
         ImGui::PushStyleColor(ImGuiCol_Text, mutedColor);
         if (font18)
             ImGui::PushFont(font18);
@@ -2560,6 +3063,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             if (IconButtonFont("PlaylistBtn", ICON_PLAYLIST.c_str(),
                                "Playlist", fontIconsSmall, ImVec2(speedBtn, speedBtn)))
                 ImGui::OpenPopup("PlaylistPopup");
+            ImGui::PopStyleVar();
+            ImGui::SameLine();
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 0.0f));
+            if (IconButtonFont("ReactBtn", ICON_REACT.c_str(),
+                               "React", fontIconsSmall, ImVec2(speedBtn, speedBtn)))
+                ImGui::OpenPopup("ReactPopup");
             ImGui::PopStyleVar();
             const float popupRound = tune(4.0f);
             ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, popupRound);
@@ -2694,6 +3203,62 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
                 ImGui::EndPopup();
             }
             ImGui::PopStyleVar(4);
+
+            ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, tune(10.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(tune(8.0f), tune(8.0f)));
+            if (ImGui::BeginPopup("ReactPopup")) {
+                static const char* kReactionSet[] = {
+                    "\xE2\x9D\xA4\xEF\xB8\x8F", // heart
+                    "\xF0\x9F\x98\x82",         // joy
+                    "\xF0\x9F\x94\xA5",         // fire
+                    "\xF0\x9F\x91\x8D",         // thumbs up
+                    "\xF0\x9F\x98\xAE",         // wow
+                    "\xF0\x9F\x98\xA2",         // cry
+                };
+                static double lastReactionSend = 0.0;
+                const float reactCell = tune(38.0f);
+                for (int ri = 0; ri < static_cast<int>(sizeof(kReactionSet) / sizeof(kReactionSet[0])); ++ri) {
+                    if (ri > 0)
+                        ImGui::SameLine();
+                    ImGui::PushID(ri);
+                    const ChatTextTexture* rtex = getReactionTex(kReactionSet[ri]);
+                    bool clickedReact = false;
+                    if (rtex && rtex->srv && rtex->size.x > 0.0f && rtex->size.y > 0.0f) {
+                        // Fixed square cell; the emoji texture is aspect-fit and
+                        // centred inside it (stretching the non-square layout
+                        // texture into the button is what mis-centred the glyphs).
+                        clickedReact = ImGui::InvisibleButton("##react",
+                                                              ImVec2(reactCell, reactCell));
+                        const ImVec2 cMin = ImGui::GetItemRectMin();
+                        const ImVec2 cMax = ImGui::GetItemRectMax();
+                        ImDrawList* rpdl = ImGui::GetWindowDrawList();
+                        if (ImGui::IsItemHovered())
+                            rpdl->AddRectFilled(cMin, cMax,
+                                                ImGui::GetColorU32(ImVec4(1, 1, 1, 0.10f)),
+                                                tune(8.0f));
+                        const float fit = std::min((reactCell * 0.82f) / rtex->size.x,
+                                                   (reactCell * 0.82f) / rtex->size.y);
+                        const ImVec2 half(rtex->size.x * fit * 0.5f, rtex->size.y * fit * 0.5f);
+                        const ImVec2 c((cMin.x + cMax.x) * 0.5f, (cMin.y + cMax.y) * 0.5f);
+                        rpdl->AddImage(reinterpret_cast<ImTextureID>(rtex->srv),
+                                       ImVec2(c.x - half.x, c.y - half.y),
+                                       ImVec2(c.x + half.x, c.y + half.y));
+                    } else {
+                        clickedReact = ImGui::Button(kReactionSet[ri], ImVec2(reactCell, reactCell));
+                    }
+                    if (clickedReact) {
+                        const double nowClick = ImGui::GetTime();
+                        if (nowClick - lastReactionSend > 0.25) {
+                            lastReactionSend = nowClick;
+                            spawnReaction(kReactionSet[ri]);
+                            session.sendReaction(kReactionSet[ri]);
+                        }
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndPopup();
+            }
+            ImGui::PopStyleVar(2);
 
             ImGui::TableSetColumnIndex(1);
             ImGuiStyle& rowStyle = ImGui::GetStyle();
@@ -2859,7 +3424,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
                 ImGui::EndDisabled();
             const float volWidth = std::max(1.0f, sliderMax.x - sliderMin.x);
             const float volCenterY = (sliderMin.y + sliderMax.y) * 0.5f;
-            const float volTrack = std::max(3.0f, tune(5.0f));
             float volT = std::clamp(volume / 100.0f, 0.0f, 1.0f);
             if (volActive) {
                 float t = (ImGui::GetIO().MousePos.x - sliderMin.x) / volWidth;
@@ -2869,36 +3433,106 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             }
             if (volDeactivated)
                 applyVolume(volume, true);
-            if (volHovered) {
-                char volTip[32];
-                std::snprintf(volTip, sizeof(volTip), "Volume %.0f", volume);
-                ShowDelayedTooltip(volTip);
+            // Same treatment as the timeline: eased hover growth, gradient fill,
+            // glowing knob, and an instant value bubble.
+            static float volHoverAnim = 0.0f;
+            {
+                const float target = (volHovered || volActive) ? 1.0f : 0.0f;
+                volHoverAnim += (target - volHoverAnim) * (1.0f - std::exp(-dt / 0.07f));
+                volHoverAnim = std::clamp(volHoverAnim, 0.0f, 1.0f);
             }
             ImDrawList* vdl = ImGui::GetWindowDrawList();
+            const float volTrack = std::max(3.0f, tune(5.0f)) + volHoverAnim * tune(2.0f);
             const ImU32 vTrackCol = ImGui::GetColorU32(hasMedia
                                                            ? ImVec4(0.30f, 0.34f, 0.40f, 0.65f)
                                                            : ImVec4(0.24f, 0.27f, 0.32f, 0.34f));
             ImVec4 volumeFill = ImGui::GetStyle().Colors[hasMedia ? ImGuiCol_CheckMark : ImGuiCol_TextDisabled];
             volumeFill.w *= hasMedia ? 1.0f : 0.55f;
-            const ImU32 vFillCol = ImGui::GetColorU32(volumeFill);
             const ImU32 vKnobCol = ImGui::GetColorU32(volumeFill);
             const float vHalf = volTrack * 0.5f;
             const float vFillX = sliderMin.x + volWidth * volT;
-            if (volHovered) {
-                const ImU32 glowCol = ImGui::GetColorU32(ImVec4(0.30f, 0.70f, 0.95f, 0.18f));
+            if (volHoverAnim > 0.01f) {
+                ImVec4 glow = volumeFill;
+                glow.w = 0.16f * volHoverAnim;
                 vdl->AddRectFilled(ImVec2(sliderMin.x - tune(1.0f), volCenterY - (vHalf + tune(2.0f))),
                                    ImVec2(sliderMax.x + tune(1.0f), volCenterY + (vHalf + tune(2.0f))),
-                                   glowCol, vHalf + tune(2.0f));
+                                   ImGui::GetColorU32(glow), vHalf + tune(2.0f));
             }
             vdl->AddRectFilled(ImVec2(sliderMin.x, volCenterY - vHalf),
                                ImVec2(sliderMax.x, volCenterY + vHalf),
                                vTrackCol, vHalf);
-            vdl->AddRectFilled(ImVec2(sliderMin.x, volCenterY - vHalf),
-                               ImVec2(vFillX, volCenterY + vHalf),
-                               vFillCol, vHalf);
+            {
+                ImVec4 vDark = volumeFill;
+                vDark.x *= 0.72f;
+                vDark.y *= 0.72f;
+                vDark.z *= 0.72f;
+                vdl->AddRectFilled(ImVec2(sliderMin.x, volCenterY - vHalf),
+                                   ImVec2(vFillX, volCenterY + vHalf),
+                                   ImGui::GetColorU32(vDark), vHalf);
+                const float vInset = vHalf;
+                if (vFillX - vInset > sliderMin.x + vInset) {
+                    ImVec4 vBright = volumeFill;
+                    vBright.x = std::min(1.0f, vBright.x * 1.18f + 0.04f);
+                    vBright.y = std::min(1.0f, vBright.y * 1.18f + 0.04f);
+                    vBright.z = std::min(1.0f, vBright.z * 1.18f + 0.04f);
+                    vdl->AddRectFilledMultiColor(ImVec2(sliderMin.x + vInset, volCenterY - vHalf),
+                                                 ImVec2(vFillX - vInset, volCenterY + vHalf),
+                                                 ImGui::GetColorU32(vDark),
+                                                 ImGui::GetColorU32(vBright),
+                                                 ImGui::GetColorU32(vBright),
+                                                 ImGui::GetColorU32(vDark));
+                }
+            }
             const float knobEps = 0.001f;
-            if (volT > knobEps && volT < 1.0f - knobEps)
-                vdl->AddCircleFilled(ImVec2(vFillX, volCenterY), tune(8.0f), vKnobCol, 16);
+            const float vKnobR = tune(6.5f) + volHoverAnim * tune(2.0f);
+            if (volT > knobEps && volT < 1.0f - knobEps) {
+                if (hasMedia) {
+                    // Cap the halo against the bar's edges (same as the timeline) so
+                    // the glow is never clipped flat at a boundary.
+                    const ImVec2 barMin = ImGui::GetWindowPos();
+                    const ImVec2 barSize = ImGui::GetWindowSize();
+                    float haloR = vKnobR * 2.0f;
+                    haloR = std::min(haloR, volCenterY - barMin.y - 1.0f);
+                    haloR = std::min(haloR, barMin.y + barSize.y - volCenterY - 1.0f);
+                    haloR = std::min(haloR, vFillX - barMin.x - 1.0f);
+                    haloR = std::min(haloR, barMin.x + barSize.x - vFillX - 1.0f);
+                    if (haloR > vKnobR * 1.05f) {
+                        ImVec4 halo = volumeFill;
+                        halo.w = 0.10f + 0.10f * volHoverAnim;
+                        vdl->AddCircleFilled(ImVec2(vFillX, volCenterY), haloR,
+                                             ImGui::GetColorU32(halo), 20);
+                        halo.w = 0.16f + 0.12f * volHoverAnim;
+                        vdl->AddCircleFilled(ImVec2(vFillX, volCenterY),
+                                             std::min(vKnobR * 1.4f, haloR * 0.75f),
+                                             ImGui::GetColorU32(halo), 20);
+                    }
+                }
+                vdl->AddCircleFilled(ImVec2(vFillX, volCenterY), vKnobR, vKnobCol, 16);
+            }
+            if (volHoverAnim > 0.05f && hasMedia && (volHovered || volActive)) {
+                char volTip[16];
+                std::snprintf(volTip, sizeof(volTip), "%.0f%%",
+                              volActive ? volT * 100.0f : volume);
+                const ImVec2 btSize = ImGui::CalcTextSize(volTip);
+                const ImVec2 bPad(tune(8.0f), tune(4.0f));
+                const float bx = std::clamp(vFillX,
+                                            sliderMin.x + btSize.x * 0.5f + bPad.x,
+                                            sliderMax.x - btSize.x * 0.5f - bPad.x);
+                const float byBottom = sliderMin.y - tune(6.0f);
+                const ImVec2 bMin(bx - btSize.x * 0.5f - bPad.x,
+                                  byBottom - btSize.y - bPad.y * 2.0f);
+                const ImVec2 bMax(bx + btSize.x * 0.5f + bPad.x, byBottom);
+                ImDrawList* vfd = ImGui::GetForegroundDrawList();
+                const float bAlpha = volHoverAnim;
+                vfd->AddRectFilled(bMin, bMax,
+                                   ImGui::ColorConvertFloat4ToU32(ImVec4(0.09f, 0.10f, 0.13f, 0.95f * bAlpha)),
+                                   tune(6.0f));
+                vfd->AddRect(bMin, bMax,
+                             ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, 0.14f * bAlpha)), tune(6.0f));
+                vfd->AddText(ImVec2(bMin.x + bPad.x, bMin.y + bPad.y),
+                             ImGui::ColorConvertFloat4ToU32(ImVec4(0.94f, 0.95f, 0.97f, 0.96f * bAlpha)),
+                             volTip);
+            }
 
             ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, popupRound);
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, popupRound);
@@ -3017,9 +3651,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         const float dockTop = (renderTopBar ? (topBarHeight + 24.0f) : 16.0f) + titleBarH;
         const float dockBottom = renderBottomBar ? barHeightUi + 16.0f : 16.0f;
         const float dockHeight = std::max(220.0f, static_cast<float>(ui_h) - dockTop - dockBottom);
-        const float sidebarRailTop = titleBarH + 12.0f;
-        const float sidebarRailBottom = 12.0f;
-        const float sidebarRailHeight = std::max(220.0f, static_cast<float>(ui_h) - sidebarRailTop - sidebarRailBottom);
+        // The docked chat rail owns the full right edge: flush under the title
+        // bar and down to the window bottom, no gaps.
+        const float sidebarRailTop = titleBarH;
+        const float sidebarRailHeight = std::max(220.0f, static_cast<float>(ui_h) - sidebarRailTop);
         const float dockPanelX = sideLayout
                                      ? std::max(edgePad, static_cast<float>(ui_w) - dockPanelW)
                                      : std::max(edgePad, static_cast<float>(ui_w) - dockPanelW - dockPad);
@@ -3060,7 +3695,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             applySubtitleStyle, openSubtitles,
             chatUnreadCount, chatSeenCount, chatInputActive,
             openFolder, browseShareFile,
-            ICON_OPEN, ICON_CHAT, ICON_OVERLAY, ICON_SIDEBAR,
+            ICON_OPEN, ICON_CHAT, ICON_OVERLAY, ICON_SIDEBAR, ICON_REACT,
             openUrl,
         };
         auto clampPanelToArea = [&](float* pos, float* size, float minW, float minH, float maxW, float maxH) {
@@ -3331,12 +3966,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             if (ImGui::MenuItem("Copy Session Link")) {
                 const std::string url = session.serverUrl();
                 const std::string code = session.sessionCode();
-                std::string link;
-                if (!url.empty() && !code.empty())
-                    link = url + " " + code;
-                else if (!code.empty())
-                    link = code;
-                if (!link.empty()) {
+                if (!code.empty()) {
+                    // Clickable deep link: opens SyncPlay and joins automatically.
+                    std::string link = "syncplay://join?code=" + UrlEncodeComponent(code);
+                    if (!url.empty())
+                        link += "&url=" + UrlEncodeComponent(url);
                     ImGui::SetClipboardText(link.c_str());
                     pushOsd("Session link copied");
                 } else {
@@ -3402,39 +4036,72 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         }
 
         if (!app.events.empty()) {
-            // Toast: symmetric padding with each line centred both axes. Size off the
-            // glyph height (not line-with-spacing) and place lines at explicit y so
-            // there's no stray trailing gap that would push the text upward.
-            const float lineH = ImGui::GetTextLineHeight();
-            const float gapY = ImGui::GetStyle().ItemSpacing.y;
-            const ImVec2 toastPad(tune(16.0f), tune(11.0f));
-            float maxToastW = 0.0f;
-            for (const auto& e : app.events)
-                maxToastW = std::max(maxToastW, ImGui::CalcTextSize(e.text.c_str()).x);
-            const int toastN = static_cast<int>(app.events.size());
-            const float toastW = maxToastW + toastPad.x * 2.0f;
-            const float toastH = toastPad.y * 2.0f + lineH * toastN + gapY * (toastN - 1);
-            ImVec4 toastBg = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
-            toastBg.w = 0.85f;
-            ImGui::SetCursorPos(ImVec2(tune(20.0f), tune(60.0f)));
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, toastBg);
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, toastPad);
-            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, tune(10.0f));
-            ImGui::BeginChild("Toasts", ImVec2(toastW, toastH), true,
-                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-            const float availW = ImGui::GetContentRegionAvail().x;
-            const float startY = ImGui::GetCursorPosY();
-            int toastIdx = 0;
+            // Toast cards: individually rounded cards stacked top-left, each with a
+            // kind-coloured pill on the left, springing in from the left
+            // (easeOutBack) and sliding out as the ttl expires.
+            const auto toastKind = [](const std::string& s) {
+                const auto has = [&](const char* n) { return s.find(n) != std::string::npos; };
+                if (has("fail") || has("Fail") || has("Invalid") || has("error") ||
+                    has("Error") || has("refused") || has("Could not"))
+                    return 2;
+                if (has("Loaded") || has("loaded") || has("Added") || has("Queued") ||
+                    has("Resumed") || has("Downloaded") || has("copied") || has("cleared") ||
+                    has("Update available"))
+                    return 1;
+                return 0;
+            };
+            ImDrawList* tdl = ImGui::GetWindowDrawList();
+            const double nowT = ImGui::GetTime();
+            const float padX = tune(12.0f);
+            const float padY = tune(9.0f);
+            const float pipW = tune(3.5f);
+            const float pipGap = tune(9.0f);
+            const float pipInsetX = tune(8.0f);
+            const float rounding = tune(9.0f);
+            const float baseX = tune(20.0f);
+            float y = tune(60.0f);
             for (auto& e : app.events) {
-                const float textW = ImGui::CalcTextSize(e.text.c_str()).x;
-                ImGui::SetCursorPos(ImVec2(toastPad.x + std::max(0.0f, (availW - textW) * 0.5f),
-                                           startY + toastIdx * (lineH + gapY)));
-                ImGui::TextUnformatted(e.text.c_str());
-                ++toastIdx;
+                if (e.addedAt < 0.0)
+                    e.addedAt = nowT;
+                // easeOutBack entry: springs in from the left with a slight bounce.
+                const float p = std::clamp(static_cast<float>((nowT - e.addedAt) / 0.30), 0.0f, 1.0f);
+                const float bk = 1.6f;
+                const float f = 1.0f + (bk + 1.0f) * std::pow(p - 1.0f, 3.0f) +
+                                bk * std::pow(p - 1.0f, 2.0f);
+                const float inA = std::clamp(p * 3.0f, 0.0f, 1.0f);
+                const float outA = e.ttl < 0.30f ? std::max(0.0f, e.ttl) / 0.30f : 1.0f;
+                const float a = inA * outA;
+                const float offX = (f - 1.0f) * tune(44.0f) - (1.0f - outA) * tune(18.0f);
+
+                const int kind = toastKind(e.text);
+                const ImVec4 kindCol = kind == 2   ? ImVec4(0.95f, 0.36f, 0.30f, 1.0f)
+                                       : kind == 1 ? ImVec4(0.40f, 0.84f, 0.56f, 1.0f)
+                                                   : ImGui::GetStyle().Colors[ImGuiCol_CheckMark];
+                const ImVec2 textSize = ImGui::CalcTextSize(e.text.c_str());
+                const float cardH = textSize.y + padY * 2.0f;
+                const float cardW = pipInsetX + pipW + pipGap + textSize.x + padX;
+                const ImVec2 mn(baseX + offX, y);
+                const ImVec2 mx(mn.x + cardW, mn.y + cardH);
+
+                tdl->AddRectFilled(mn, mx,
+                                   ImGui::ColorConvertFloat4ToU32(ImVec4(0.10f, 0.11f, 0.14f, 0.92f * a)),
+                                   rounding);
+                tdl->AddRect(mn, mx,
+                             ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, 0.10f * a)), rounding);
+                // Kind-coloured pill, inset so it always stays inside the card's
+                // rounded silhouette.
+                const float pipInsetY = tune(6.0f);
+                tdl->AddRectFilled(ImVec2(mn.x + pipInsetX, mn.y + pipInsetY),
+                                   ImVec2(mn.x + pipInsetX + pipW, mx.y - pipInsetY),
+                                   ImGui::ColorConvertFloat4ToU32(
+                                       ImVec4(kindCol.x, kindCol.y, kindCol.z, 0.95f * a)),
+                                   pipW * 0.5f);
+                tdl->AddText(ImVec2(mn.x + pipInsetX + pipW + pipGap,
+                                    mn.y + (cardH - textSize.y) * 0.5f),
+                             ImGui::ColorConvertFloat4ToU32(ImVec4(0.94f, 0.95f, 0.97f, 0.96f * a)),
+                             e.text.c_str());
+                y += cardH + tune(8.0f);
             }
-            ImGui::EndChild();
-            ImGui::PopStyleVar(2);
-            ImGui::PopStyleColor();
             for (auto& e : app.events)
                 e.ttl -= ImGui::GetIO().DeltaTime;
             while (!app.events.empty() && app.events.front().ttl <= 0.0f)
@@ -3473,6 +4140,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         mpv_render_context_free(renderState.ctx);
     mpv_terminate_destroy(mpv);
 
+    CleanupTaskbar();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
