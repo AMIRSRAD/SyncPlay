@@ -15,6 +15,7 @@
 #include <nlohmann/json.hpp>
 
 #include "../core/logging.h"
+#include "../core/net_proxy.h"
 #include "../core/utf.h"
 
 namespace {
@@ -86,9 +87,16 @@ std::string HttpRequest(const std::wstring& host, const std::wstring& path,
                         const std::string& apiKey, const std::string& body,
                         DWORD* statusOut = nullptr) {
     std::string response;
-    HINTERNET session = WinHttpOpen(L"SyncPlay v1",
-                                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    std::string appProxy = GetAppProxy();
+    const size_t schemePos = appProxy.find("://");
+    if (schemePos != std::string::npos)
+        appProxy = appProxy.substr(schemePos + 3);
+    const std::wstring proxyW = WideFromUtf8(appProxy);
+    HINTERNET session = appProxy.empty()
+                            ? WinHttpOpen(L"SyncPlay v1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0)
+                            : WinHttpOpen(L"SyncPlay v1", WINHTTP_ACCESS_TYPE_NAMED_PROXY,
+                                          proxyW.c_str(), WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session)
         return response;
     WinHttpSetTimeouts(session, 8000, 8000, 8000, 15000);

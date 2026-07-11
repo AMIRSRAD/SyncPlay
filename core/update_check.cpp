@@ -10,6 +10,8 @@
 #include <nlohmann/json.hpp>
 
 #include "logging.h"
+#include "net_proxy.h"
+#include "utf.h"
 
 namespace {
 std::mutex g_updateMutex;
@@ -48,10 +50,20 @@ bool IsNewer(const std::string& candidate, const std::string& current) {
 
 std::string HttpGet(const wchar_t* host, const wchar_t* path) {
     std::string body;
-    // DEFAULT_PROXY honours the machine's WinHTTP/IE proxy configuration.
-    HINTERNET session = WinHttpOpen(L"SyncPlay-UpdateCheck",
-                                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    // Honour the app's optional proxy setting; otherwise the default (which
+    // follows any machine-level WinHTTP proxy, i.e. usually direct).
+    std::string appProxy = GetAppProxy();
+    const size_t schemePos = appProxy.find("://");
+    if (schemePos != std::string::npos)
+        appProxy = appProxy.substr(schemePos + 3);
+    const std::wstring proxyW = WideFromUtf8(appProxy);
+    HINTERNET session = appProxy.empty()
+                            ? WinHttpOpen(L"SyncPlay-UpdateCheck",
+                                          WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0)
+                            : WinHttpOpen(L"SyncPlay-UpdateCheck",
+                                          WINHTTP_ACCESS_TYPE_NAMED_PROXY,
+                                          proxyW.c_str(), WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session)
         return body;
     WinHttpSetTimeouts(session, 5000, 5000, 5000, 10000);

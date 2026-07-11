@@ -85,6 +85,7 @@ void load_config(AppState& app, float* volume, float* speed) {
     app.sidePanels = j.value("sidePanels", app.sidePanels);
     app.glassPanels = j.value("glassPanels", app.glassPanels);
     app.dynamicAccent = j.value("dynamicAccent", app.dynamicAccent);
+    app.useSystemProxy = j.value("useSystemProxy", app.useSystemProxy);
     if (j.contains("recentMedia") && j["recentMedia"].is_array()) {
         app.recentMedia.clear();
         for (const auto& e : j["recentMedia"]) {
@@ -169,6 +170,7 @@ void save_config(const AppState& app, float volume, float speed) {
     j["sidePanels"] = app.sidePanels;
     j["glassPanels"] = app.glassPanels;
     j["dynamicAccent"] = app.dynamicAccent;
+    j["useSystemProxy"] = app.useSystemProxy;
     {
         nlohmann::json recents = nlohmann::json::array();
         for (const auto& r : app.recentMedia) {

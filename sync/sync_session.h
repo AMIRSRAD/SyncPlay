@@ -24,6 +24,8 @@ public:
     explicit SyncSession(PlaybackController* player);
 
     void setNickname(const std::string& nickname);
+    // HTTP proxy for the signaling connection ("" = direct).
+    void setNetworkProxy(const std::string& url);
     void setSignalingPort(int port);
     void setSessionPassword(const std::string& password);
     void setSelectedInterfaceAddress(const std::string& address);

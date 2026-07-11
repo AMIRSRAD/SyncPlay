@@ -18,6 +18,7 @@
 #include "ui_helpers.h"
 #include "panel_utils.h"
 #include "chat_text.h"
+#include "../core/net_proxy.h"
 #include "../core/update_check.h"
 #include "../media/opensubtitles.h"
 #include "../media/mpv_helpers.h"
@@ -215,6 +216,28 @@ void DrawSettingsPanel(PanelContext& ctx) {
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Connection")) {
+                    if (ImGui::CollapsingHeader("Network", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        static std::string detectedProxy = DetectSystemProxy();
+                        if (ImGui::Checkbox("Use system proxy", &app.useSystemProxy)) {
+                            app.dirty = true;
+                            detectedProxy = DetectSystemProxy();
+                            const std::string proxy =
+                                app.useSystemProxy ? detectedProxy : std::string();
+                            SetAppProxy(proxy);
+                            mpv_set_option_string(ctx.mpv, "http-proxy", proxy.c_str());
+                            session.setNetworkProxy(proxy);
+                        }
+                        if (app.useSystemProxy) {
+                            if (detectedProxy.empty())
+                                ImGui::TextDisabled("No system proxy is configured in Windows.");
+                            else
+                                ImGui::TextDisabled("Proxy: %s", detectedProxy.c_str());
+                            ImGui::TextDisabled("Applies to streams, sessions, and online search. "
+                                                "Local connections stay direct.");
+                        } else {
+                            ImGui::TextDisabled("All connections are direct.");
+                        }
+                    }
                     if (ImGui::CollapsingHeader("Identity", ImGuiTreeNodeFlags_DefaultOpen)) {
                         if (ImGui::InputText("Nickname", app.nickname, sizeof(app.nickname)))
                             app.dirty = true;

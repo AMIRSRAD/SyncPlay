@@ -68,6 +68,7 @@ struct AppState {
     bool sidePanels = false;
     bool glassPanels = true;
     bool dynamicAccent = true;
+    bool useSystemProxy = false;
     bool allowGuestControl = true;
     bool autoPromote = false;
     bool lanMode = false;

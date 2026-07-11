@@ -141,6 +141,10 @@ void SyncSession::setNickname(const std::string& nickname) {
     m_nickname = Trim(nickname);
 }
 
+void SyncSession::setNetworkProxy(const std::string& url) {
+    m_signalingClient.setProxy(url);
+}
+
 void SyncSession::setSignalingPort(int port) {
     m_signalingPort = port;
 }

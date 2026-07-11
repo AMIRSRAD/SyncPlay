@@ -63,7 +63,20 @@ void SignalingClient::connectToServer(const std::string& url) {
         m_socket.reset();
     }
     m_joined = false;
-    m_socket = std::make_shared<rtc::WebSocket>();
+    rtc::WebSocket::Configuration wsConfig;
+    // Loopback targets connect directly: routing 127.0.0.1 through a proxy
+    // would break self-hosted sessions.
+    const bool loopback = wsUrl.find("127.0.0.1") != std::string::npos ||
+                          wsUrl.find("localhost") != std::string::npos;
+    if (!m_proxyUrl.empty() && !loopback) {
+        try {
+            wsConfig.proxyServer = rtc::ProxyServer(m_proxyUrl);
+            LogInfo("signaling") << "Using proxy " << m_proxyUrl << std::endl;
+        } catch (const std::exception& e) {
+            LogWarn("signaling") << "Invalid proxy " << m_proxyUrl << ": " << e.what() << std::endl;
+        }
+    }
+    m_socket = std::make_shared<rtc::WebSocket>(wsConfig);
     m_socket->onOpen([this, generation]() {
         if (generation != m_generation.load(std::memory_order_relaxed))
             return;
@@ -96,6 +109,10 @@ void SignalingClient::connectToServer(const std::string& url) {
 
     setConnectionState("Connecting");
     m_socket->open(wsUrl);
+}
+
+void SignalingClient::setProxy(const std::string& url) {
+    m_proxyUrl = url;
 }
 
 void SignalingClient::disconnect() {

@@ -9,6 +9,7 @@
 #include "platform/file_dialog.h"
 #include "core/utf.h"
 #include "core/crash_dump.h"
+#include "core/net_proxy.h"
 #include "core/update_check.h"
 #include "core/logging.h"
 
@@ -1260,6 +1261,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
     float savedVolume = 100.0f;
     float savedSpeed = 1.0f;
     load_config(app, &savedVolume, &savedSpeed);
+    // Apply the proxy before anything touches the network (update check, mpv).
+    if (app.useSystemProxy) {
+        const std::string sysProxy = DetectSystemProxy();
+        SetAppProxy(sysProxy);
+        if (!sysProxy.empty())
+            mpv_set_option_string(mpv, "http-proxy", sysProxy.c_str());
+    }
 #ifdef SYNCPLAY_VERSION
     StartUpdateCheck(SYNCPLAY_VERSION);
 #endif
@@ -1313,6 +1321,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
     applyAccent(app.accentColor);
     MpvPlaybackController playback(mpv);
     SyncSession session(&playback);
+    session.setNetworkProxy(GetAppProxy());
     session.setNickname(std::string(app.nickname));
     session.setSignalingPort(app.signalingPort);
     session.setSessionPassword(std::string(app.sessionPassword));
@@ -1516,6 +1525,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
     bool running = true;
     bool paused = false;
     bool scrubbing = false;
+    // True from a network-URL loadfile until mpv reports loaded/failed; drives
+    // the "Connecting stream..." indicator (slow hosts can take a minute).
+    bool streamOpening = false;
     float scrubPos = 0.0f;
     double lastScrubSyncValue = -1.0;
     auto lastScrubSyncSend = std::chrono::steady_clock::now();
@@ -1605,6 +1617,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         mpv_command(mpv, cmd);
         setLocalFileUtf8(url);
         resetScrubState();
+        streamOpening = true;
         app.events.push_back({"Opening stream", 2.5f});
         session.shareOpenUrl(url);
     };
@@ -1980,7 +1993,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
             mpv_event* ev = mpv_wait_event(mpv, 0);
             if (!ev || ev->event_id == MPV_EVENT_NONE)
                 break;
+            if (ev->event_id == MPV_EVENT_END_FILE) {
+                streamOpening = false;
+                const auto* ef = static_cast<const mpv_event_end_file*>(ev->data);
+                if (ef && ef->reason == MPV_END_FILE_REASON_ERROR) {
+                    std::string why = mpv_error_string(ef->error);
+                    app.events.push_back({"Failed to open: " + why, 4.5f});
+                }
+            }
             if (ev->event_id == MPV_EVENT_FILE_LOADED) {
+                streamOpening = false;
                 resetScrubState();
                 updateLocalFileFromMpv();
                 applySubtitleStyle(false);
@@ -1999,6 +2021,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         paused = mpv_get_flag(mpv, "pause", paused);
         const double duration = mpv_get_double(mpv, "duration", 0.0);
         double position = mpv_get_double(mpv, "time-pos", 0.0);
+        const bool bufferingStall = mpv_get_flag(mpv, "paused-for-cache", false);
+        const int64_t bufferPct = mpv_get_int64(mpv, "cache-buffering-state", 100);
 
         // Surface the background update-check result once, as a toast.
         {
@@ -4176,6 +4200,34 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                 uiHovered = true;
             ImGui::End();
             ImGui::PopStyleVar(2);
+        }
+
+        // Stream status pill (top-centre): "Connecting" while a network URL is
+        // being opened (slow hosts can take a minute of silence otherwise) and
+        // "Buffering N%" during mid-play cache stalls.
+        if (streamOpening || (hasMedia && bufferingStall)) {
+            char stText[64];
+            if (streamOpening) {
+                const int dots = static_cast<int>(ImGui::GetTime() * 2.0) % 4;
+                std::snprintf(stText, sizeof(stText), "Connecting stream%.*s", dots, "...");
+            } else {
+                std::snprintf(stText, sizeof(stText), "Buffering %d%%",
+                              static_cast<int>(bufferPct));
+            }
+            ImDrawList* sdl = ImGui::GetWindowDrawList();
+            const ImVec2 stSize = ImGui::CalcTextSize(stText);
+            const ImVec2 stPad(tune(14.0f), tune(8.0f));
+            const float stW = stSize.x + stPad.x * 2.0f;
+            const float stH = stSize.y + stPad.y * 2.0f;
+            const ImVec2 mn((static_cast<float>(ui_w) - stW) * 0.5f, tune(60.0f));
+            const ImVec2 mx(mn.x + stW, mn.y + stH);
+            sdl->AddRectFilled(mn, mx,
+                               ImGui::ColorConvertFloat4ToU32(ImVec4(0.10f, 0.11f, 0.14f, 0.92f)),
+                               stH * 0.5f);
+            sdl->AddRect(mn, mx,
+                         ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, 0.12f)), stH * 0.5f);
+            sdl->AddText(ImVec2(mn.x + stPad.x, mn.y + stPad.y),
+                         ImGui::GetColorU32(ImGuiCol_Text), stText);
         }
 
         if (!app.events.empty()) {

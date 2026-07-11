@@ -34,6 +34,7 @@ if (WIN32)
             core/utf.cpp
             core/crash_dump.cpp
             core/update_check.cpp
+            core/net_proxy.cpp
             sync/sync_session.cpp
             sync/sync_manager.cpp
             network/signaling_client.cpp

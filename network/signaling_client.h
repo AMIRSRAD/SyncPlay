@@ -37,6 +37,9 @@ public:
     SignalingClient();
 
     void connectToServer(const std::string& url);
+    // HTTP proxy for the WebSocket connection ("" = direct). Loopback targets
+    // always connect directly, so hosting a local relay keeps working.
+    void setProxy(const std::string& url);
     void disconnect();
     void resetSession();
     void joinSession(const std::string& code, const std::string& role, const std::string& mode = std::string());
@@ -100,6 +103,7 @@ private:
     std::string m_pendingJoinMode;
     std::string m_joinMode;
     std::string m_lastUrl;
+    std::string m_proxyUrl;
     bool m_joined = false;
     std::vector<std::string> m_pendingOutgoing;
     std::atomic<uint64_t> m_generation{0};
