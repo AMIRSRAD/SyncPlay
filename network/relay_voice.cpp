@@ -186,6 +186,10 @@ float RelayVoice::inputThreshold() const {
     return m_inputThreshold.load(std::memory_order_relaxed);
 }
 
+float RelayVoice::inputLevel() const {
+    return m_inputLevel.load(std::memory_order_relaxed);
+}
+
 int RelayVoice::captureDeviceIndex() const {
     return m_captureDeviceIndex;
 }
@@ -247,25 +251,30 @@ void RelayVoice::audioCallback(ma_device* device, void* output, const void* inpu
     if (output && bytes > 0)
         std::memset(output, 0, bytes);
 
+    // Capture peak for the UI level meter — tracked even while muted so the user
+    // can confirm the mic works before unmuting.
+    float normalizedPeak = 0.0f;
+    if (input && bytes > 0) {
+        const auto* samples = static_cast<const int16_t*>(input);
+        const size_t count = bytes / sizeof(int16_t);
+        int peak = 0;
+        for (size_t i = 0; i < count; ++i) {
+            const int sample = std::abs(static_cast<int>(samples[i]));
+            if (sample > peak)
+                peak = sample;
+        }
+        normalizedPeak = static_cast<float>(peak) / 32767.0f;
+        self->m_inputLevel.store(normalizedPeak, std::memory_order_relaxed);
+    }
+
     if (input && bytes > 0 &&
         self->m_active.load(std::memory_order_relaxed) &&
         !self->m_inputMuted.load(std::memory_order_relaxed)) {
         const auto* src = static_cast<const uint8_t*>(input);
         bool shouldSend = true;
         const float threshold = self->m_inputThreshold.load(std::memory_order_relaxed);
-        if (threshold > 0.0f) {
-            const auto* samples = static_cast<const int16_t*>(input);
-            const size_t count = bytes / sizeof(int16_t);
-            int peak = 0;
-            for (size_t i = 0; i < count; ++i) {
-                const int sample = std::abs(static_cast<int>(samples[i]));
-                if (sample > peak)
-                    peak = sample;
-            }
-            const float normalizedPeak = static_cast<float>(peak) / 32767.0f;
-            if (normalizedPeak < threshold)
-                shouldSend = false;
-        }
+        if (threshold > 0.0f && normalizedPeak < threshold)
+            shouldSend = false;
         if (shouldSend) {
             std::lock_guard<std::mutex> lock(self->m_outgoingMutex);
             if (self->m_outgoing.size() < 64)

@@ -49,6 +49,10 @@ extern bool g_pendingDrop;
 extern bool g_pendingDpiChange;
 extern unsigned int g_pendingDpiValue;
 extern std::vector<std::wstring> g_dropPaths;
+// Paths (or syncplay:// links) forwarded from a second app instance via
+// WM_COPYDATA (Explorer multi-select "Open" spawns one process per file).
+extern std::vector<std::wstring> g_ipcOpenPaths;
+extern bool g_pendingIpcOpen;
 extern SwRenderState* g_renderState;
 extern std::atomic<bool> g_requestExit;
 extern std::atomic<bool> g_inSizing;
@@ -82,3 +86,9 @@ void ApplyCustomWindowChrome(HWND hWnd);
 // CleanupTaskbar on shutdown.
 void UpdateTaskbar(HWND hWnd, double position, double duration, bool paused, bool hasMedia);
 void CleanupTaskbar();
+
+// OLE drop target (replaces WM_DROPFILES) so the UI can show a "Drop to play"
+// overlay while files are dragged over the window. True while hovering.
+extern bool g_dropHovering;
+bool RegisterFileDropTarget(HWND hWnd);
+void RevokeFileDropTarget(HWND hWnd);

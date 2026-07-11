@@ -27,3 +27,10 @@ struct PlaylistItem {
 };
 
 std::vector<PlaylistItem> mpv_read_playlist(mpv_handle* mpv);
+
+struct AudioDeviceInfo {
+    std::string name;        // mpv device id, e.g. "wasapi/{...}"
+    std::string description; // human-readable label
+};
+
+std::vector<AudioDeviceInfo> mpv_read_audio_devices(mpv_handle* mpv);

@@ -467,6 +467,10 @@ bool SyncSession::voiceMuted() const {
     return m_voiceMuted;
 }
 
+float SyncSession::voiceInputLevel() const {
+    return m_relayVoice.inputLevel();
+}
+
 std::string SyncSession::voiceState() const {
     return m_relayVoice.connectionState();
 }
@@ -516,6 +520,14 @@ bool SyncSession::sessionActive() const {
 bool SyncSession::transportConnected() const {
     if (m_hostingSession)
         return m_relayGuestCount > 0;
+    return m_relayHostOnline;
+}
+
+int SyncSession::guestCount() const {
+    return m_relayGuestCount;
+}
+
+bool SyncSession::hostOnline() const {
     return m_relayHostOnline;
 }
 

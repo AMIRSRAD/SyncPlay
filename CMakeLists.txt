@@ -6,7 +6,7 @@ endif()
 # Single source of truth for the app version: the About tab reads it via the
 # SYNCPLAY_VERSION compile definition and packaging/build_installer.ps1 parses
 # this line. Bump it here only.
-project(SyncPlay VERSION 1.1.0 LANGUAGES CXX)
+project(SyncPlay VERSION 1.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

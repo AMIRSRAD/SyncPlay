@@ -33,6 +33,86 @@
 // Each panel function aliases the context members back to the local names used by
 // the original inline code in wWinMain, so the panel body below is verbatim.
 
+namespace {
+// Minimal ghost close button in the panel's top-right corner. Call right after
+// BeginPanel* (cursor position is preserved). Returns true when clicked.
+bool PanelCloseButton(const std::function<float(float)>& tune) {
+    const float sz = tune(22.0f);
+    const ImVec2 winSize = ImGui::GetWindowSize();
+    const ImVec2 saved = ImGui::GetCursorPos();
+    ImGui::SetCursorPos(ImVec2(winSize.x - sz - tune(12.0f), tune(12.0f)));
+    const bool clicked = ImGui::InvisibleButton("##panelclose", ImVec2(sz, sz));
+    const bool hov = ImGui::IsItemHovered();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 mn = ImGui::GetItemRectMin();
+    const ImVec2 mx = ImGui::GetItemRectMax();
+    const ImVec2 c((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f);
+    if (hov)
+        dl->AddCircleFilled(c, sz * 0.5f, ImGui::GetColorU32(ImVec4(1, 1, 1, 0.12f)), 20);
+    const float k = sz * 0.20f;
+    const ImU32 xc = ImGui::GetColorU32(ImVec4(1, 1, 1, hov ? 0.95f : 0.50f));
+    const float th = std::max(1.2f, tune(1.4f));
+    dl->AddLine(ImVec2(c.x - k, c.y - k), ImVec2(c.x + k, c.y + k), xc, th);
+    dl->AddLine(ImVec2(c.x - k, c.y + k), ImVec2(c.x + k, c.y - k), xc, th);
+    ImGui::SetCursorPos(saved);
+    return clicked;
+}
+
+// Settings slider row: label-left layout with a small undo button that appears
+// when the value differs from its default.
+bool SliderRow(const char* label, const char* id, float* v, float minV, float maxV,
+               const char* fmt, float defV, float rowLabelW) {
+    static const std::string kUndoGlyph = Utf8FromCodepoint(0xE7A7);
+    PanelRowLabel(label, rowLabelW);
+    const float resetW = ImGui::GetFrameHeight();
+    ImGui::SetNextItemWidth(-(resetW + ImGui::GetStyle().ItemSpacing.x));
+    bool changed = ImGui::SliderFloat(id, v, minV, maxV, fmt);
+    ImGui::SameLine();
+    if (std::fabs(*v - defV) > 0.0001f) {
+        // Custom-drawn button so the glyph is truly centred (the merged MDL2
+        // glyph advance is wider than its ink, which skews Button's centring).
+        ImGui::PushID(id);
+        const bool clicked = ImGui::InvisibleButton("##reset", ImVec2(resetW, resetW));
+        const bool hovered = ImGui::IsItemHovered();
+        const bool held = ImGui::IsItemActive();
+        const ImVec2 mn = ImGui::GetItemRectMin();
+        const ImVec2 mx = ImGui::GetItemRectMax();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImGuiCol bgCol = held ? ImGuiCol_ButtonActive
+                               : hovered ? ImGuiCol_ButtonHovered
+                                         : ImGuiCol_Button;
+        dl->AddRectFilled(mn, mx, ImGui::GetColorU32(bgCol),
+                          ImGui::GetStyle().FrameRounding);
+        // Centre on the glyph's actual ink, not its advance.
+        ImFont* fnt = ImGui::GetFont();
+        const char* gBegin = kUndoGlyph.c_str();
+        const char* gEnd = gBegin + kUndoGlyph.size();
+        if (const ImFontGlyph* glyph = fnt->FindGlyph(static_cast<ImWchar>(0xE7A7))) {
+            const float gw = glyph->X1 - glyph->X0;
+            const float gh = glyph->Y1 - glyph->Y0;
+            const ImVec2 gpos(mn.x + ((mx.x - mn.x) - gw) * 0.5f - glyph->X0,
+                              mn.y + ((mx.y - mn.y) - gh) * 0.5f - glyph->Y0);
+            dl->AddText(gpos, ImGui::GetColorU32(ImGuiCol_Text), gBegin, gEnd);
+        } else {
+            const ImVec2 ts = ImGui::CalcTextSize(gBegin);
+            dl->AddText(ImVec2(mn.x + ((mx.x - mn.x) - ts.x) * 0.5f,
+                               mn.y + ((mx.y - mn.y) - ts.y) * 0.5f),
+                        ImGui::GetColorU32(ImGuiCol_Text), gBegin, gEnd);
+        }
+        if (clicked) {
+            *v = defV;
+            changed = true;
+        }
+        if (hovered)
+            StyledTooltip("Reset");
+        ImGui::PopID();
+    } else {
+        ImGui::Dummy(ImVec2(resetW, resetW));
+    }
+    return changed;
+}
+} // namespace
+
 void DrawSettingsPanel(PanelContext& ctx) {
     AppState& app = ctx.app;
     SyncSession& session = ctx.session;
@@ -72,6 +152,8 @@ void DrawSettingsPanel(PanelContext& ctx) {
             nextPanelHeaderMin = panelPos;
             nextPanelHeaderMax = ImVec2(panelPos.x + panelSize.x, panelPos.y + panelHeaderH);
             BeginPanelNoScroll("SettingsPanel", panelPos, panelSize, panelAlpha, panelFade, basePad);
+            if (PanelCloseButton(ctx.tune))
+                app.showSettings = false;
             ImGui::AlignTextToFramePadding();
             if (font22)
                 ImGui::PushFont(font22);
@@ -79,66 +161,99 @@ void DrawSettingsPanel(PanelContext& ctx) {
             if (font22)
                 ImGui::PopFont();
             ImGui::Separator();
+            const float rowLabelW = ctx.tune(150.0f);
             if (ImGui::BeginTabBar("SettingsTabs")) {
                 if (ImGui::BeginTabItem("Audio")) {
-                    ImGui::TextUnformatted("Audio controls are in the player bar.");
-                    ImGui::TextWrapped("Voice uses the host relay server. It does not use P2P, STUN, or TURN.");
-                    ImGui::Text("Microphone: %s", app.voiceMuted ? "Muted" : "Live");
-                    ImGui::Separator();
-                    if (ImGui::SliderFloat("Voice Volume", &app.voiceVolume, 0.0f, 100.0f, "%.0f")) {
+                    PanelSection("Output");
+                    // mpv's audio device list; refreshed lazily and on demand.
+                    static std::vector<AudioDeviceInfo> audioDevices;
+                    static bool audioDevicesLoaded = false;
+                    if (!audioDevicesLoaded) {
+                        audioDevices = mpv_read_audio_devices(ctx.mpv);
+                        audioDevicesLoaded = true;
+                    }
+                    char* curDevRaw = mpv_get_property_string(ctx.mpv, "audio-device");
+                    const std::string curDev = curDevRaw ? curDevRaw : "auto";
+                    if (curDevRaw)
+                        mpv_free(curDevRaw);
+                    int devIndex = 0;
+                    std::vector<std::string> devLabels;
+                    devLabels.reserve(audioDevices.size() + 1);
+                    devLabels.push_back("Automatic");
+                    for (size_t di = 0; di < audioDevices.size(); ++di) {
+                        devLabels.push_back(audioDevices[di].description.empty()
+                                                ? audioDevices[di].name
+                                                : audioDevices[di].description);
+                        if (audioDevices[di].name == curDev)
+                            devIndex = static_cast<int>(di) + 1;
+                    }
+                    std::vector<const char*> devPtrs;
+                    devPtrs.reserve(devLabels.size());
+                    for (const auto& l : devLabels)
+                        devPtrs.push_back(l.c_str());
+                    PanelRowLabel("Device", rowLabelW);
+                    if (ImGui::Combo("##audiodev", &devIndex, devPtrs.data(),
+                                     static_cast<int>(devPtrs.size()))) {
+                        const std::string chosen =
+                            devIndex <= 0 ? "auto"
+                                          : audioDevices[static_cast<size_t>(devIndex - 1)].name;
+                        mpv_set_property_string(ctx.mpv, "audio-device", chosen.c_str());
+                        app.events.push_back({"Audio output changed", 1.5f});
+                    }
+                    if (ImGui::SmallButton("Refresh devices")) {
+                        audioDevices = mpv_read_audio_devices(ctx.mpv);
+                        app.events.push_back({"Audio devices refreshed", 1.2f});
+                    }
+                    double audioDelay = mpv_get_double(ctx.mpv, "audio-delay", 0.0);
+                    float audioDelayF = static_cast<float>(audioDelay);
+                    if (SliderRow("Audio delay (s)", "##audiodelay", &audioDelayF, -2.0f, 2.0f,
+                                  "%.2f", 0.0f, rowLabelW)) {
+                        double v = audioDelayF;
+                        mpv_set_property(ctx.mpv, "audio-delay", MPV_FORMAT_DOUBLE, &v);
+                    }
+
+                    PanelSection("Voice");
+                    PanelRowLabel("Voice volume", rowLabelW);
+                    if (ImGui::SliderFloat("##voicevol", &app.voiceVolume, 0.0f, 100.0f, "%.0f")) {
                         session.setVoiceVolume(app.voiceVolume);
                         app.dirty = true;
                     }
                     ImGui::Text("Voice: %s", session.voiceState().c_str());
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("- microphone %s", app.voiceMuted ? "muted" : "live");
                     if (!session.voiceActive() && !session.voiceAvailable()) {
                         if (!app.voiceEnabled)
-                            ImGui::TextDisabled("Enable voice in Voice Call before connecting.");
+                            ImGui::TextDisabled("Enable voice in the Call panel before connecting.");
                         else
-                            ImGui::TextDisabled("Voice is available after exactly one peer is connected.");
+                            ImGui::TextDisabled("Voice is available once exactly one peer is connected.");
                     }
-                    ImGui::TextDisabled("Use the top-bar Call section to connect or end voice calls.");
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Video")) {
-                    ImGui::TextUnformatted("Color");
-                    if (ImGui::SliderFloat("Brightness", &app.videoBrightness, -100.0f, 100.0f, "%.0f"))
+                    PanelSection("Color");
+                    if (SliderRow("Brightness", "##vbright", &app.videoBrightness, -100.0f, 100.0f, "%.0f", 0.0f, rowLabelW))
                         applyVideoColor();
-                    if (ImGui::SliderFloat("Contrast", &app.videoContrast, -100.0f, 100.0f, "%.0f"))
+                    if (SliderRow("Contrast", "##vcontrast", &app.videoContrast, -100.0f, 100.0f, "%.0f", 0.0f, rowLabelW))
                         applyVideoColor();
-                    if (ImGui::SliderFloat("Saturation", &app.videoSaturation, -100.0f, 100.0f, "%.0f"))
+                    if (SliderRow("Saturation", "##vsat", &app.videoSaturation, -100.0f, 100.0f, "%.0f", 0.0f, rowLabelW))
                         applyVideoColor();
-                    if (ImGui::SliderFloat("Gamma", &app.videoGamma, -100.0f, 100.0f, "%.0f"))
+                    if (SliderRow("Gamma", "##vgamma", &app.videoGamma, -100.0f, 100.0f, "%.0f", 0.0f, rowLabelW))
                         applyVideoColor();
-                    if (ImGui::SliderFloat("Hue", &app.videoHue, -100.0f, 100.0f, "%.0f"))
+                    if (SliderRow("Hue", "##vhue", &app.videoHue, -100.0f, 100.0f, "%.0f", 0.0f, rowLabelW))
                         applyVideoColor();
-                    if (ImGui::Button("Reset Color")) {
-                        app.videoBrightness = 0.0f;
-                        app.videoContrast = 0.0f;
-                        app.videoSaturation = 0.0f;
-                        app.videoGamma = 0.0f;
-                        app.videoHue = 0.0f;
-                        applyVideoColor();
-                    }
-                    ImGui::Separator();
-                    ImGui::TextUnformatted("Tone Mapping");
+                    PanelSection("Tone Mapping");
                     const char* toneLabels[] = {
                         "Auto", "Clip", "Linear", "Gamma", "Reinhard", "Hable", "Mobius", "BT.2390"
                     };
-                    if (ImGui::Combo("Mode", &app.videoToneMapping, toneLabels,
+                    PanelRowLabel("Mode", rowLabelW);
+                    if (ImGui::Combo("##tonemode", &app.videoToneMapping, toneLabels,
                                      static_cast<int>(sizeof(toneLabels) / sizeof(toneLabels[0]))))
                         applyToneMapping();
-                    if (ImGui::SliderFloat("Param", &app.videoToneMappingParam, 0.0f, 1.0f, "%.2f"))
+                    if (SliderRow("Param", "##toneparam", &app.videoToneMappingParam, 0.0f, 1.0f, "%.2f", 0.0f, rowLabelW))
                         applyToneMapping();
-                    if (ImGui::SliderFloat("Target Peak (nits)", &app.videoTargetPeak, 100.0f, 2000.0f, "%.0f"))
+                    if (SliderRow("Target peak (nits)", "##tonepeak", &app.videoTargetPeak, 100.0f, 2000.0f, "%.0f", 300.0f, rowLabelW))
                         applyToneMapping();
-                    if (ImGui::Button("Reset Tone Mapping")) {
-                        app.videoToneMapping = 0;
-                        app.videoToneMappingParam = 0.0f;
-                        app.videoTargetPeak = 300.0f;
-                        applyToneMapping();
-                    }
-                    ImGui::Separator();
-                    ImGui::TextUnformatted("Shaders");
+                    PanelSection("Shaders");
                     if (ImGui::Button("Add Shader")) {
                         const std::wstring path = openFileDialog(
                             g_hWnd,
@@ -194,29 +309,30 @@ void DrawSettingsPanel(PanelContext& ctx) {
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Appearance")) {
-                    ImGui::TextUnformatted("Theme");
+                    PanelSection("Theme");
                     // Accent is applied via an eased transition in the main loop
                     // (see curAccent), so we only update the stored colour here.
-                    if (ImGui::ColorEdit3("Accent", app.accentColor, ImGuiColorEditFlags_DisplayRGB))
+                    PanelRowLabel("Accent colour", rowLabelW);
+                    if (ImGui::ColorEdit3("##accent", app.accentColor, ImGuiColorEditFlags_DisplayRGB))
                         app.dirty = true;
-                    if (ImGui::Button("Reset Accent")) {
+                    if (ImGui::Checkbox("Dynamic accent (match video)", &app.dynamicAccent))
+                        app.dirty = true;
+                    ImGui::TextDisabled("Tints the interface with the video's dominant colour.");
+                    if (ImGui::SmallButton("Reset accent")) {
                         app.accentColor[0] = accent.x;
                         app.accentColor[1] = accent.y;
                         app.accentColor[2] = accent.z;
                         app.dirty = true;
                     }
-                    if (ImGui::Checkbox("Dynamic accent (match video)", &app.dynamicAccent))
-                        app.dirty = true;
-                    ImGui::TextDisabled("Tints the interface with the video's dominant colour.");
-                    ImGui::Separator();
-                    ImGui::TextUnformatted("Panels");
+                    PanelSection("Panels");
                     if (ImGui::Checkbox("Frosted glass (blur)", &app.glassPanels))
                         app.dirty = true;
                     ImGui::TextDisabled("Turn off to save CPU on lower-end systems.");
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Connection")) {
-                    if (ImGui::CollapsingHeader("Network", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    PanelSection("Network");
+                    {
                         static std::string detectedProxy = DetectSystemProxy();
                         if (ImGui::Checkbox("Use system proxy", &app.useSystemProxy)) {
                             app.dirty = true;
@@ -238,23 +354,25 @@ void DrawSettingsPanel(PanelContext& ctx) {
                             ImGui::TextDisabled("All connections are direct.");
                         }
                     }
-                    if (ImGui::CollapsingHeader("Identity", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        if (ImGui::InputText("Nickname", app.nickname, sizeof(app.nickname)))
-                            app.dirty = true;
-                        session.setNickname(std::string(app.nickname));
-                    }
-                    if (ImGui::CollapsingHeader("Signaling", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        if (ImGui::InputText("Server URL", app.serverUrl, sizeof(app.serverUrl)))
-                            app.dirty = true;
-                        if (ImGui::Checkbox("Auto-promote host", &app.autoPromote))
-                            app.dirty = true;
-                        ImGui::TextUnformatted("Mode: host relay server");
-                        if (ImGui::InputText("Session Password", app.sessionPassword, sizeof(app.sessionPassword),
-                                             ImGuiInputTextFlags_Password))
-                            app.dirty = true;
-                        session.setSessionPassword(std::string(app.sessionPassword));
-                        session.setAutoPromote(app.autoPromote);
+                    PanelSection("Identity");
+                    PanelRowLabel("Nickname", rowLabelW);
+                    if (ImGui::InputText("##nickname", app.nickname, sizeof(app.nickname)))
+                        app.dirty = true;
+                    session.setNickname(std::string(app.nickname));
 
+                    PanelSection("Signaling");
+                    PanelRowLabel("Server URL", rowLabelW);
+                    if (ImGui::InputText("##serverurl", app.serverUrl, sizeof(app.serverUrl)))
+                        app.dirty = true;
+                    PanelRowLabel("Session password", rowLabelW);
+                    if (ImGui::InputText("##sesspass", app.sessionPassword, sizeof(app.sessionPassword),
+                                         ImGuiInputTextFlags_Password))
+                        app.dirty = true;
+                    if (ImGui::Checkbox("Auto-promote host", &app.autoPromote))
+                        app.dirty = true;
+                    session.setSessionPassword(std::string(app.sessionPassword));
+                    session.setAutoPromote(app.autoPromote);
+                    {
                         auto ifaceLabels = session.interfaceLabels();
                         auto ifaceAddresses = session.interfaceAddresses();
                         int ifaceIndex = 0;
@@ -274,7 +392,8 @@ void DrawSettingsPanel(PanelContext& ctx) {
                             ifaceLabelPtrs.push_back(ifaceLabelStorage.back().c_str());
                         }
                         if (!ifaceLabelPtrs.empty()) {
-                            if (ImGui::Combo("Interface", &ifaceIndex, ifaceLabelPtrs.data(),
+                            PanelRowLabel("Interface", rowLabelW);
+                            if (ImGui::Combo("##iface", &ifaceIndex, ifaceLabelPtrs.data(),
                                              static_cast<int>(ifaceLabelPtrs.size()))) {
                                 const std::string addr = ifaceAddresses[static_cast<size_t>(ifaceIndex)];
                                 std::snprintf(app.preferredInterface, sizeof(app.preferredInterface), "%s", addr.c_str());
@@ -283,12 +402,12 @@ void DrawSettingsPanel(PanelContext& ctx) {
                             }
                         }
                     }
-                    if (ImGui::CollapsingHeader("Voice Transport", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        ImGui::TextWrapped("Voice uses the host relay server. TURN/STUN is not used.");
-                    }
+                    ImGui::TextDisabled("Transport: host relay server. Voice uses the same relay; "
+                                        "TURN/STUN is not used.");
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Diagnostics")) {
+                    PanelSection("Logging");
                     if (ImGui::Checkbox("Enable file logging", &app.fileLoggingEnabled)) {
                         SyncPlayLog::SetEnabled(app.fileLoggingEnabled);
                         app.dirty = true;
@@ -383,6 +502,8 @@ void DrawSessionPanel(PanelContext& ctx) {
             nextPanelHeaderMin = panelPos;
             nextPanelHeaderMax = ImVec2(panelPos.x + panelSize.x, panelPos.y + panelHeaderH);
             BeginPanelNoScroll("SessionPanel", panelPos, panelSize, panelAlpha, panelFade, basePad);
+            if (PanelCloseButton(ctx.tune))
+                app.showSession = false;
             ImGui::AlignTextToFramePadding();
             if (font22)
                 ImGui::PushFont(font22);
@@ -390,60 +511,257 @@ void DrawSessionPanel(PanelContext& ctx) {
             if (font22)
                 ImGui::PopFont();
             ImGui::Separator();
-            if (font14)
-                ImGui::PushFont(font14);
-            ImGui::TextUnformatted("Status");
-            if (font14)
-                ImGui::PopFont();
-            ImGui::Text("State: %s", app.sessionStatus.c_str());
-            if (!app.sessionHint.empty())
-                ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_CheckMark], "%s", app.sessionHint.c_str());
-            if (!app.fileStatus.empty()) {
-                const ImVec4 okColor = ImGui::GetStyle().Colors[ImGuiCol_CheckMark];
-                const ImVec4 warnColor = ImVec4(0.97f, 0.78f, 0.42f, 1.0f);
-                ImGui::TextColored(app.fileVerified ? okColor : warnColor, "File: %s", app.fileStatus.c_str());
-            }
-            const std::string activeUrl = session.serverUrl();
-            const std::string activeCode = session.sessionCode();
-            if (!activeUrl.empty())
-                ImGui::TextWrapped("URL: %s", activeUrl.c_str());
-            if (!activeCode.empty())
-                ImGui::Text("Code: %s", activeCode.c_str());
-            if (session.sessionActive()) {
-                const std::string syncText = session.syncConfidenceText();
-                const double drift = std::abs(session.syncDriftSeconds());
-                ImVec4 syncColor = ImGui::GetStyle().Colors[ImGuiCol_TextDisabled];
-                if (syncText == "Synced" || syncText == "Sync host")
-                    syncColor = ImGui::GetStyle().Colors[ImGuiCol_CheckMark];
-                else if (syncText.rfind("Resyncing", 0) == 0)
-                    syncColor = ImVec4(0.97f, 0.58f, 0.35f, 1.0f);
-                ImGui::TextColored(syncColor, "Playback sync: %s", syncText.c_str());
-                if (drift > 0.01 && !session.isHost())
-                    ImGui::TextDisabled("Estimated drift: %.2fs", drift);
-            }
-            if (session.sessionActive()) {
-                if (ImGui::Button("Disconnect")) {
-                    session.disconnectSession();
-                    app.sessionStatus = session.statusText();
-                    app.sessionHint = session.hintText();
-                }
-            }
-            ImGui::Separator();
 
-            if (ImGui::BeginTabBar("SessionTabs")) {
-                if (ImGui::BeginTabItem("Join")) {
-                    ImGui::InputText("Server URL", app.serverUrl, sizeof(app.serverUrl));
-                    ImGui::InputText("Join Code", app.joinCode, sizeof(app.joinCode));
-                    if (ImGui::Checkbox("Enable voice", &app.voiceEnabled)) {
-                        session.setVoiceEnabled(app.voiceEnabled);
-                        if (!app.voiceEnabled) {
-                            app.voiceMuted = true;
-                            session.setVoiceMuted(true);
-                        }
-                        app.dirty = true;
+            const bool sessionLive = session.sessionActive();
+            auto& tune = ctx.tune;
+            const float contentW = ImGui::GetContentRegionAvail().x;
+
+            if (sessionLive) {
+                // ---- Live room view -------------------------------------------------
+                // Status: coloured dot + short phrase.
+                ImVec4 dotCol(0.97f, 0.78f, 0.42f, 1.0f); // waiting (amber)
+                std::string phrase;
+                const std::string sigState = session.signalingState();
+                if (sigState == "Reconnecting") {
+                    dotCol = ImVec4(0.95f, 0.36f, 0.30f, 1.0f);
+                    phrase = "Reconnecting...";
+                } else if (session.transportConnected()) {
+                    dotCol = ImVec4(0.40f, 0.84f, 0.56f, 1.0f);
+                    if (session.isHost()) {
+                        const int guests = session.guestCount();
+                        phrase = "Connected - " + std::to_string(guests + 1) + " watching";
+                    } else {
+                        phrase = "Connected to host";
                     }
-                    ImGui::TextDisabled("Voice uses the host relay server. Microphone starts muted.");
-                    if (ImGui::Button("Join Session")) {
+                } else {
+                    phrase = session.isHost() ? "Waiting for guests..." : "Waiting for host...";
+                }
+                {
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    const float dotR = tune(5.0f);
+                    const ImVec2 cur = ImGui::GetCursorScreenPos();
+                    const float lineH = ImGui::GetTextLineHeight();
+                    dl->AddCircleFilled(ImVec2(cur.x + dotR, cur.y + lineH * 0.55f), dotR,
+                                        ImGui::ColorConvertFloat4ToU32(dotCol), 16);
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + dotR * 2.0f + tune(8.0f));
+                    ImGui::TextUnformatted(phrase.c_str());
+                }
+
+                // Peer presence: you + guest avatars.
+                {
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    const float avD = tune(26.0f);
+                    const float avGap = tune(6.0f);
+                    ImVec2 cur = ImGui::GetCursorScreenPos();
+                    cur.y += tune(4.0f);
+                    const std::string self = app.nickname[0] ? app.nickname : "You";
+                    // Stable hue from the nickname (same recipe as chat avatars).
+                    uint32_t h = 2166136261u;
+                    for (unsigned char c : self) { h ^= c; h *= 16777619u; }
+                    float rr = 0, gg = 0, bb = 0;
+                    ImGui::ColorConvertHSVtoRGB(static_cast<float>(h % 360u) / 360.0f, 0.55f, 0.85f,
+                                                rr, gg, bb);
+                    dl->AddCircleFilled(ImVec2(cur.x + avD * 0.5f, cur.y + avD * 0.5f), avD * 0.5f,
+                                        ImGui::ColorConvertFloat4ToU32(ImVec4(rr, gg, bb, 0.95f)), 24);
+                    char selfInitial[2] = {static_cast<char>(std::toupper(
+                                               static_cast<unsigned char>(self[0]))),
+                                           0};
+                    const ImVec2 gs = ImGui::CalcTextSize(selfInitial);
+                    dl->AddText(ImVec2(cur.x + (avD - gs.x) * 0.5f, cur.y + (avD - gs.y) * 0.5f),
+                                ImGui::ColorConvertFloat4ToU32(ImVec4(0.05f, 0.06f, 0.08f, 0.95f)),
+                                selfInitial);
+                    // Peer circles (generic; the roster doesn't carry names).
+                    const int peers = session.isHost() ? session.guestCount()
+                                                       : (session.hostOnline() ? 1 : 0);
+                    for (int p = 0; p < std::min(peers, 8); ++p) {
+                        const float x = cur.x + (avD + avGap) * static_cast<float>(p + 1);
+                        dl->AddCircleFilled(ImVec2(x + avD * 0.5f, cur.y + avD * 0.5f), avD * 0.5f,
+                                            ImGui::GetColorU32(ImVec4(1, 1, 1, 0.16f)), 24);
+                        const char* glyph = session.isHost() ? "G" : "H";
+                        const ImVec2 pg = ImGui::CalcTextSize(glyph);
+                        dl->AddText(ImVec2(x + (avD - pg.x) * 0.5f, cur.y + (avD - pg.y) * 0.5f),
+                                    ImGui::GetColorU32(ImGuiCol_TextDisabled), glyph);
+                    }
+                    ImGui::Dummy(ImVec2(contentW, avD + tune(8.0f)));
+                }
+
+                // The session code, big and click-to-copy.
+                const std::string activeCode = session.sessionCode();
+                if (!activeCode.empty()) {
+                    std::string spaced;
+                    for (size_t ci = 0; ci < activeCode.size(); ++ci) {
+                        if (ci) spaced += ' ';
+                        spaced += activeCode[ci];
+                    }
+                    ImFont* codeFont = font22 ? font22 : ImGui::GetFont();
+                    const ImVec2 codeSize = codeFont->CalcTextSizeA(codeFont->FontSize, FLT_MAX,
+                                                                    0.0f, spaced.c_str());
+                    const ImVec2 chipPad(tune(22.0f), tune(10.0f));
+                    const float chipW = codeSize.x + chipPad.x * 2.0f;
+                    const float chipH = codeSize.y + chipPad.y * 2.0f;
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                                         std::max(0.0f, (contentW - chipW) * 0.5f));
+                    const bool codeClicked = ImGui::InvisibleButton("##sessioncode",
+                                                                    ImVec2(chipW, chipH));
+                    const bool codeHovered = ImGui::IsItemHovered();
+                    if (codeHovered)
+                        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    const ImVec2 mn = ImGui::GetItemRectMin();
+                    const ImVec2 mx = ImGui::GetItemRectMax();
+                    dl->AddRectFilled(mn, mx,
+                                      ImGui::GetColorU32(ImVec4(1, 1, 1, codeHovered ? 0.13f : 0.07f)),
+                                      tune(10.0f));
+                    dl->AddRect(mn, mx, ImGui::GetColorU32(ImVec4(1, 1, 1, 0.12f)), tune(10.0f));
+                    dl->AddText(codeFont, codeFont->FontSize,
+                                ImVec2(mn.x + chipPad.x, mn.y + chipPad.y),
+                                ImGui::GetColorU32(ImGuiCol_CheckMark), spaced.c_str());
+                    if (codeHovered)
+                        StyledTooltip("Click to copy the session code");
+                    if (codeClicked) {
+                        ImGui::SetClipboardText(activeCode.c_str());
+                        app.events.push_back({"Session code copied", 1.5f});
+                    }
+                }
+
+                // Action row: invite link / URL / disconnect.
+                {
+                    const float btnW = (contentW - ImGui::GetStyle().ItemSpacing.x * 2.0f) / 3.0f;
+                    if (ImGui::Button("Copy invite link", ImVec2(btnW, 0.0f))) {
+                        const std::string link = ctx.buildInviteLink ? ctx.buildInviteLink()
+                                                                     : std::string();
+                        if (!link.empty()) {
+                            ImGui::SetClipboardText(link.c_str());
+                            app.events.push_back({"Invite link copied", 1.5f});
+                        } else {
+                            app.events.push_back({"No session link", 1.5f});
+                        }
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Copy URL", ImVec2(btnW, 0.0f))) {
+                        const std::string url = session.serverUrl();
+                        if (!url.empty()) {
+                            ImGui::SetClipboardText(url.c_str());
+                            app.events.push_back({"Server URL copied", 1.5f});
+                        }
+                    }
+                    ImGui::SameLine();
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.20f, 0.18f, 0.55f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.80f, 0.26f, 0.22f, 0.75f));
+                    if (ImGui::Button("Disconnect", ImVec2(btnW, 0.0f))) {
+                        session.disconnectSession();
+                        app.sessionStatus = session.statusText();
+                        app.sessionHint = session.hintText();
+                    }
+                    ImGui::PopStyleColor(2);
+                }
+
+                PanelSection("Details");
+                const std::string activeUrl = session.serverUrl();
+                if (!activeUrl.empty())
+                    ImGui::TextDisabled("URL: %s", activeUrl.c_str());
+                if (!app.fileStatus.empty()) {
+                    const ImVec4 okColor = ImGui::GetStyle().Colors[ImGuiCol_CheckMark];
+                    const ImVec4 warnColor = ImVec4(0.97f, 0.78f, 0.42f, 1.0f);
+                    ImGui::TextColored(app.fileVerified ? okColor : warnColor, "File: %s",
+                                       app.fileStatus.c_str());
+                }
+                {
+                    const std::string syncText = session.syncConfidenceText();
+                    const double drift = std::abs(session.syncDriftSeconds());
+                    ImVec4 syncColor = ImGui::GetStyle().Colors[ImGuiCol_TextDisabled];
+                    if (syncText == "Synced" || syncText == "Sync host")
+                        syncColor = ImGui::GetStyle().Colors[ImGuiCol_CheckMark];
+                    else if (syncText.rfind("Resyncing", 0) == 0)
+                        syncColor = ImVec4(0.97f, 0.58f, 0.35f, 1.0f);
+                    ImGui::TextColored(syncColor, "Playback sync: %s", syncText.c_str());
+                    if (drift > 0.01 && !session.isHost())
+                        ImGui::TextDisabled("Estimated drift: %.2fs", drift);
+                }
+            } else {
+                // ---- Setup view: two action cards, then the matching form ----------
+                static int sessionMode = 0; // 0 = host, 1 = join
+                const float cardGap = ImGui::GetStyle().ItemSpacing.x;
+                const float cardW = (contentW - cardGap) * 0.5f;
+                const float cardH = tune(64.0f);
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                const auto drawModeCard = [&](const char* id, const char* title,
+                                              const char* subtitle, int mode) {
+                    ImGui::PushID(id);
+                    const bool clicked = ImGui::InvisibleButton("##card", ImVec2(cardW, cardH));
+                    const bool hovered = ImGui::IsItemHovered();
+                    const bool selected = sessionMode == mode;
+                    if (hovered)
+                        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    const ImVec2 mn = ImGui::GetItemRectMin();
+                    const ImVec2 mx = ImGui::GetItemRectMax();
+                    ImVec4 bg = selected ? ImGui::GetStyle().Colors[ImGuiCol_CheckMark]
+                                         : ImVec4(1, 1, 1, hovered ? 0.12f : 0.06f);
+                    if (selected)
+                        bg.w = 0.22f;
+                    dl->AddRectFilled(mn, mx, ImGui::ColorConvertFloat4ToU32(bg), tune(10.0f));
+                    ImVec4 border = selected ? ImGui::GetStyle().Colors[ImGuiCol_CheckMark]
+                                             : ImVec4(1, 1, 1, 0.12f);
+                    if (selected)
+                        border.w = 0.85f;
+                    dl->AddRect(mn, mx, ImGui::ColorConvertFloat4ToU32(border), tune(10.0f), 0,
+                                selected ? 2.0f : 1.0f);
+                    const float padX = tune(14.0f);
+                    dl->AddText(ImVec2(mn.x + padX, mn.y + tune(11.0f)),
+                                ImGui::GetColorU32(ImGuiCol_Text), title);
+                    dl->AddText(ImVec2(mn.x + padX,
+                                       mn.y + tune(11.0f) + ImGui::GetTextLineHeight() + tune(3.0f)),
+                                ImGui::GetColorU32(ImGuiCol_TextDisabled), subtitle);
+                    ImGui::PopID();
+                    if (clicked)
+                        sessionMode = mode;
+                };
+                drawModeCard("hostcard", "Host a party", "Start a room on this PC", 0);
+                ImGui::SameLine();
+                drawModeCard("joincard", "Join a party", "Enter a code from a friend", 1);
+                ImGui::Spacing();
+
+                const float rowW = tune(150.0f);
+                bool joinNow = false;
+                if (sessionMode == 1) {
+                    PanelRowLabel("Server URL", rowW);
+                    ImGui::InputText("##joinurl", app.serverUrl, sizeof(app.serverUrl));
+                    PanelRowLabel("Code", rowW);
+                    if (ImGui::InputText("##joincode", app.joinCode, sizeof(app.joinCode),
+                                         ImGuiInputTextFlags_CharsUppercase |
+                                             ImGuiInputTextFlags_EnterReturnsTrue))
+                        joinNow = true;
+                } else {
+                    PanelRowLabel("Port", rowW);
+                    if (ImGui::InputInt("##hostport", &app.signalingPort))
+                        app.dirty = true;
+                    if (ImGui::Checkbox("Allow guest control", &app.allowGuestControl))
+                        app.dirty = true;
+                    session.setSignalingPort(app.signalingPort);
+                    session.setAllowGuestControl(app.allowGuestControl);
+                }
+                if (ImGui::Checkbox("Enable voice", &app.voiceEnabled)) {
+                    session.setVoiceEnabled(app.voiceEnabled);
+                    if (!app.voiceEnabled) {
+                        app.voiceMuted = true;
+                        session.setVoiceMuted(true);
+                    }
+                    app.dirty = true;
+                }
+                ImGui::TextDisabled("Voice uses the host relay server. Microphone starts muted.");
+                ImGui::Spacing();
+
+                // Primary action: full-width accent button.
+                ImVec4 actCol = ImGui::GetStyle().Colors[ImGuiCol_CheckMark];
+                actCol.w = 0.55f;
+                ImVec4 actHov = ImGui::GetStyle().Colors[ImGuiCol_CheckMark];
+                actHov.w = 0.75f;
+                ImGui::PushStyleColor(ImGuiCol_Button, actCol);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, actHov);
+                if (sessionMode == 1) {
+                    if (ImGui::Button("Join Session", ImVec2(contentW, tune(34.0f))))
+                        joinNow = true;
+                    if (joinNow) {
                         session.setNickname(std::string(app.nickname));
                         session.setSignalingPort(app.signalingPort);
                         session.setVoiceEnabled(app.voiceEnabled);
@@ -452,25 +770,8 @@ void DrawSessionPanel(PanelContext& ctx) {
                         app.sessionStatus = session.statusText();
                         app.sessionHint = session.hintText();
                     }
-                    ImGui::EndTabItem();
-                }
-                if (ImGui::BeginTabItem("Host")) {
-                    if (ImGui::InputInt("Signaling Port", &app.signalingPort))
-                        app.dirty = true;
-                    if (ImGui::Checkbox("Allow guest control", &app.allowGuestControl))
-                        app.dirty = true;
-                    if (ImGui::Checkbox("Enable voice", &app.voiceEnabled)) {
-                        session.setVoiceEnabled(app.voiceEnabled);
-                        if (!app.voiceEnabled) {
-                            app.voiceMuted = true;
-                            session.setVoiceMuted(true);
-                        }
-                        app.dirty = true;
-                    }
-                    ImGui::TextDisabled("Voice uses the host relay server. Microphone starts muted.");
-                    session.setSignalingPort(app.signalingPort);
-                    session.setAllowGuestControl(app.allowGuestControl);
-                    if (ImGui::Button("Create Session")) {
+                } else {
+                    if (ImGui::Button("Create Session", ImVec2(contentW, tune(34.0f)))) {
                         session.setNickname(std::string(app.nickname));
                         session.setVoiceEnabled(app.voiceEnabled);
                         session.setVoiceMuted(app.voiceMuted);
@@ -478,13 +779,296 @@ void DrawSessionPanel(PanelContext& ctx) {
                         app.sessionStatus = session.statusText();
                         app.sessionHint = session.hintText();
                         const std::string serverUrl = session.serverUrl();
-                        if (!serverUrl.empty()) {
-                            std::snprintf(app.serverUrl, sizeof(app.serverUrl), "%s", serverUrl.c_str());
+                        if (!serverUrl.empty())
+                            std::snprintf(app.serverUrl, sizeof(app.serverUrl), "%s",
+                                          serverUrl.c_str());
+                    }
+                }
+                ImGui::PopStyleColor(2);
+                if (!app.sessionHint.empty())
+                    ImGui::TextDisabled("%s", app.sessionHint.c_str());
+            }
+            if (ImGui::IsWindowHovered(hoverFlags))
+                uiHovered = true;
+            EndPanel();
+    }
+}
+
+void DrawPlaylistPanel(PanelContext& ctx) {
+    AppState& app = ctx.app;
+    mpv_handle* mpv = ctx.mpv;
+    bool& uiHovered = ctx.uiHovered;
+    bool& panelRectHovered = ctx.panelRectHovered;
+    bool& nextPanelHeaderValid = ctx.nextPanelHeaderValid;
+    ImVec2& nextPanelHeaderMin = ctx.nextPanelHeaderMin;
+    ImVec2& nextPanelHeaderMax = ctx.nextPanelHeaderMax;
+    const float panelAreaLeft = ctx.panelAreaLeft;
+    const float panelAreaTop = ctx.panelAreaTop;
+    const float panelAreaW = ctx.panelAreaW;
+    const float panelAreaH = ctx.panelAreaH;
+    const float panelHeaderH = ctx.panelHeaderH;
+    const float panelFade = ctx.panelFade;
+    const ImVec2 basePad = ctx.basePad;
+    const ImGuiHoveredFlags hoverFlags = ctx.hoverFlags;
+    ImFont* font22 = ctx.font22;
+    ImFont* fontChat = ctx.fontChat;
+    auto& centeredSheetSize = ctx.centeredSheetSize;
+    auto& tune = ctx.tune;
+    const ImGuiIO& io = ImGui::GetIO();
+
+    {
+            const float panelAlpha = g_fullscreen ? 0.70f : 0.94f;
+            const ImVec2 panelSize = centeredSheetSize(720.0f, 620.0f, 520.0f, 420.0f);
+            ImVec2 panelPos(panelAreaLeft + (panelAreaW - panelSize.x) * 0.5f,
+                            panelAreaTop + (panelAreaH - panelSize.y) * 0.5f);
+            const ImVec2 mousePos = io.MousePos;
+            if (mousePos.x >= panelPos.x && mousePos.x <= panelPos.x + panelSize.x &&
+                mousePos.y >= panelPos.y && mousePos.y <= panelPos.y + panelSize.y) {
+                panelRectHovered = true;
+            }
+            nextPanelHeaderValid = true;
+            nextPanelHeaderMin = panelPos;
+            nextPanelHeaderMax = ImVec2(panelPos.x + panelSize.x, panelPos.y + panelHeaderH);
+            BeginPanelNoScroll("PlaylistPanel", panelPos, panelSize, panelAlpha, panelFade, basePad);
+            if (PanelCloseButton(ctx.tune))
+                app.showPlaylist = false;
+
+            const auto playlistItems = mpv_read_playlist(mpv);
+            const int64_t playlistPos = mpv_get_int64(mpv, "playlist-pos", -1);
+
+            ImGui::AlignTextToFramePadding();
+            if (font22)
+                ImGui::PushFont(font22);
+            ImGui::TextUnformatted("Playlist");
+            if (font22)
+                ImGui::PopFont();
+            if (!playlistItems.empty()) {
+                ImGui::SameLine();
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("%d item%s", static_cast<int>(playlistItems.size()),
+                                    playlistItems.size() == 1 ? "" : "s");
+            }
+            // Header actions, right-aligned.
+            {
+                const float addW = ImGui::CalcTextSize("Add").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+                const float clrW = ImGui::CalcTextSize("Clear").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+                const float gap = ImGui::GetStyle().ItemSpacing.x;
+                // Keep clear of the panel close button in the top-right corner.
+                const float closeClearance = ctx.tune(34.0f);
+                ImGui::SameLine(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x -
+                                addW - clrW - gap - closeClearance);
+                if (ImGui::Button("Add")) {
+                    const std::vector<std::wstring> paths = openFileDialogMulti(
+                        g_hWnd,
+                        L"Video Files\0*.mp4;*.mkv;*.avi;*.mov;*.webm\0All Files\0*.*\0",
+                        L"Add to Playlist");
+                    bool firstLoadsNow = playlistItems.empty();
+                    for (const std::wstring& path : paths) {
+                        if (firstLoadsNow) {
+                            if (ctx.playLocalFile)
+                                ctx.playLocalFile(path);
+                            firstLoadsNow = false;
+                        } else {
+                            const std::string utf8 = Utf8FromWide(path);
+                            const char* cmd[] = { "loadfile", utf8.c_str(), "append", nullptr };
+                            mpv_command(mpv, cmd);
                         }
                     }
-                    ImGui::EndTabItem();
+                    if (paths.size() > 1)
+                        app.events.push_back({"Added " + std::to_string(paths.size()) + " to playlist", 1.5f});
+                    else if (!paths.empty())
+                        app.events.push_back({"Added to playlist", 1.5f});
                 }
-                ImGui::EndTabBar();
+                ImGui::SameLine();
+                if (playlistItems.empty())
+                    ImGui::BeginDisabled();
+                if (ImGui::Button("Clear")) {
+                    const char* cmd[] = { "playlist-clear", nullptr };
+                    mpv_command(mpv, cmd);
+                    app.events.push_back({"Playlist cleared", 1.5f});
+                }
+                if (playlistItems.empty())
+                    ImGui::EndDisabled();
+            }
+            ImGui::Separator();
+
+            if (playlistItems.empty()) {
+                // Empty state, centred.
+                const char* line1 = "Queue is empty";
+                const char* line2 = "Drop files on the window or click Add";
+                const float availH = ImGui::GetContentRegionAvail().y;
+                ImGui::Dummy(ImVec2(0.0f, std::max(0.0f, availH * 0.4f - ImGui::GetTextLineHeight())));
+                const float w1 = ImGui::CalcTextSize(line1).x;
+                ImGui::SetCursorPosX((panelSize.x - w1) * 0.5f);
+                ImGui::TextUnformatted(line1);
+                const float w2 = ImGui::CalcTextSize(line2).x;
+                ImGui::SetCursorPosX((panelSize.x - w2) * 0.5f);
+                ImGui::TextDisabled("%s", line2);
+            } else {
+                ImGui::BeginChild("PlaylistRows", ImVec2(0.0f, 0.0f), false);
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                ImFont* rowFont = fontChat ? fontChat : ImGui::GetFont();
+                const float rowH = tune(40.0f);
+                const float rounding = tune(8.0f);
+                const ImVec4 accent = ImGui::GetStyle().Colors[ImGuiCol_CheckMark];
+                for (const auto& item : playlistItems) {
+                    ImGui::PushID(item.index);
+                    const bool isCurrent = item.current || item.index == playlistPos;
+                    const float rowW = ImGui::GetContentRegionAvail().x;
+                    const ImVec2 rowMin = ImGui::GetCursorScreenPos();
+                    const ImVec2 rowMax(rowMin.x + rowW, rowMin.y + rowH);
+                    // Hover is rect-based (not item-based) because the action buttons
+                    // must be SUBMITTED BEFORE the row's hit item — earlier items win
+                    // mouse-press in ImGui, so buttons submitted after the row never
+                    // received clicks (presses started a row drag instead).
+                    const bool rowHovered = ImGui::IsWindowHovered() &&
+                                            ImGui::IsMouseHoveringRect(rowMin, rowMax);
+
+                    // Row visuals.
+                    if (isCurrent) {
+                        ImVec4 bg = accent;
+                        bg.w = 0.16f;
+                        dl->AddRectFilled(rowMin, rowMax, ImGui::ColorConvertFloat4ToU32(bg), rounding);
+                        ImVec4 pip = accent;
+                        pip.w = 0.9f;
+                        dl->AddRectFilled(ImVec2(rowMin.x + tune(4.0f), rowMin.y + rowH * 0.25f),
+                                          ImVec2(rowMin.x + tune(7.0f), rowMax.y - rowH * 0.25f),
+                                          ImGui::ColorConvertFloat4ToU32(pip), 1.5f);
+                    } else if (rowHovered) {
+                        dl->AddRectFilled(rowMin, rowMax,
+                                          ImGui::GetColorU32(ImVec4(1, 1, 1, 0.06f)), rounding);
+                    }
+                    // Index number.
+                    char idxText[8];
+                    std::snprintf(idxText, sizeof(idxText), "%d", item.index + 1);
+                    const ImVec2 idxSize = ImGui::CalcTextSize(idxText);
+                    dl->AddText(ImVec2(rowMin.x + tune(16.0f),
+                                       rowMin.y + (rowH - idxSize.y) * 0.5f),
+                                ImGui::GetColorU32(ImGuiCol_TextDisabled), idxText);
+                    // Title (chat font handles non-Latin names), clipped before the
+                    // hover action buttons.
+                    std::string label = item.title;
+                    if (label.empty())
+                        label = std::filesystem::path(WideFromUtf8(item.filename))
+                                    .filename().string();
+                    if (label.empty())
+                        label = "Item " + std::string(idxText);
+                    const float actionsW = rowHovered ? tune(84.0f) : tune(8.0f);
+                    const float textX = rowMin.x + tune(42.0f);
+                    dl->PushClipRect(ImVec2(textX, rowMin.y),
+                                     ImVec2(rowMax.x - actionsW, rowMax.y), true);
+                    dl->AddText(rowFont, rowFont->FontSize,
+                                ImVec2(textX, rowMin.y + (rowH - rowFont->FontSize) * 0.5f),
+                                ImGui::GetColorU32(isCurrent ? ImGuiCol_CheckMark : ImGuiCol_Text),
+                                label.c_str());
+                    dl->PopClipRect();
+
+                    // Hover actions: play / remove as circular vector-drawn buttons —
+                    // an accent play disc and a neutral disc that turns red on hover.
+                    // Pure draw-list shapes, so they stay crisp at any DPI.
+                    bool removedThis = false;
+                    if (rowHovered) {
+                        const float mbSz = tune(22.0f);
+                        const float mbGap = tune(8.0f);
+                        const float mbY = rowMin.y + (rowH - mbSz) * 0.5f;
+                        const float mbX2 = rowMax.x - tune(12.0f) - mbSz;      // remove
+                        const float mbX1 = mbX2 - mbGap - mbSz;                // play
+                        ImDrawList* bdl = ImGui::GetWindowDrawList();
+
+                        // Play: accent disc + dark triangle.
+                        ImGui::SetCursorScreenPos(ImVec2(mbX1, mbY));
+                        const bool playClick = ImGui::InvisibleButton("##rowplay", ImVec2(mbSz, mbSz));
+                        {
+                            const bool hov = ImGui::IsItemHovered();
+                            const ImVec2 c(mbX1 + mbSz * 0.5f, mbY + mbSz * 0.5f);
+                            const float r = mbSz * 0.5f;
+                            ImVec4 acc = ImGui::GetStyle().Colors[ImGuiCol_CheckMark];
+                            acc.w = hov ? 1.0f : 0.82f;
+                            bdl->AddCircleFilled(c, r, ImGui::ColorConvertFloat4ToU32(acc), 24);
+                            const ImU32 dark = ImGui::ColorConvertFloat4ToU32(
+                                ImVec4(0.05f, 0.06f, 0.08f, 0.95f));
+                            bdl->AddTriangleFilled(
+                                ImVec2(c.x - r * 0.26f, c.y - r * 0.42f),
+                                ImVec2(c.x - r * 0.26f, c.y + r * 0.42f),
+                                ImVec2(c.x + r * 0.48f, c.y), dark);
+                        }
+                        if (playClick) {
+                            const std::string idx = std::to_string(item.index);
+                            const char* cmd[] = { "playlist-play-index", idx.c_str(), nullptr };
+                            mpv_command(mpv, cmd);
+                        }
+
+                        // Remove: quiet disc that turns red on hover, with a stroked X.
+                        ImGui::SetCursorScreenPos(ImVec2(mbX2, mbY));
+                        const bool removeClick = ImGui::InvisibleButton("##rowremove", ImVec2(mbSz, mbSz));
+                        {
+                            const bool hov = ImGui::IsItemHovered();
+                            const ImVec2 c(mbX2 + mbSz * 0.5f, mbY + mbSz * 0.5f);
+                            const float r = mbSz * 0.5f;
+                            const ImU32 bg = ImGui::ColorConvertFloat4ToU32(
+                                hov ? ImVec4(0.90f, 0.30f, 0.26f, 0.92f)
+                                    : ImVec4(1.0f, 1.0f, 1.0f, 0.10f));
+                            bdl->AddCircleFilled(c, r, bg, 24);
+                            const float k = r * 0.38f;
+                            const ImU32 xc = ImGui::ColorConvertFloat4ToU32(
+                                ImVec4(1.0f, 1.0f, 1.0f, hov ? 0.98f : 0.75f));
+                            const float th = std::max(1.5f, tune(1.7f));
+                            bdl->AddLine(ImVec2(c.x - k, c.y - k), ImVec2(c.x + k, c.y + k), xc, th);
+                            bdl->AddLine(ImVec2(c.x - k, c.y + k), ImVec2(c.x + k, c.y - k), xc, th);
+                        }
+                        if (removeClick) {
+                            const std::string idx = std::to_string(item.index);
+                            const char* cmd[] = { "playlist-remove", idx.c_str(), nullptr };
+                            mpv_command(mpv, cmd);
+                            app.events.push_back({"Removed from playlist", 1.2f});
+                            removedThis = true;
+                        }
+                    }
+
+                    // Row hit item LAST: the buttons above already claimed any press
+                    // on them, so this only sees clicks on the rest of the row.
+                    ImGui::SetCursorScreenPos(rowMin);
+                    ImGui::InvisibleButton("##row", ImVec2(rowW, rowH));
+                    const bool rowClicked = ImGui::IsItemHovered() &&
+                                            ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+                    // Drag to reorder: the payload is the source playlist index.
+                    if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                        ImGui::SetDragDropPayload("PLAYLIST_ROW", &item.index, sizeof(int));
+                        std::string dragLabel = item.title;
+                        if (dragLabel.empty())
+                            dragLabel = std::filesystem::path(WideFromUtf8(item.filename))
+                                            .filename().string();
+                        ImGui::TextUnformatted(dragLabel.empty() ? "item" : dragLabel.c_str());
+                        ImGui::EndDragDropSource();
+                    }
+                    if (ImGui::BeginDragDropTarget()) {
+                        if (const ImGuiPayload* payload =
+                                ImGui::AcceptDragDropPayload("PLAYLIST_ROW")) {
+                            const int from = *static_cast<const int*>(payload->Data);
+                            int to = item.index;
+                            if (from != to) {
+                                // mpv playlist-move inserts before `to`; moving down
+                                // needs the +1 because removal shifts indices.
+                                if (from < to)
+                                    to += 1;
+                                const std::string a = std::to_string(from);
+                                const std::string b = std::to_string(to);
+                                const char* cmd[] = { "playlist-move", a.c_str(), b.c_str(), nullptr };
+                                mpv_command(mpv, cmd);
+                            }
+                        }
+                        ImGui::EndDragDropTarget();
+                    }
+                    if (rowClicked && !removedThis) {
+                        const std::string idx = std::to_string(item.index);
+                        const char* cmd[] = { "playlist-play-index", idx.c_str(), nullptr };
+                        mpv_command(mpv, cmd);
+                    }
+                    ImGui::PopID();
+                    if (removedThis)
+                        break; // indices shifted; redraw next frame
+                }
+                ImGui::EndChild();
             }
             if (ImGui::IsWindowHovered(hoverFlags))
                 uiHovered = true;
@@ -527,6 +1111,8 @@ void DrawCallPanel(PanelContext& ctx) {
             nextPanelHeaderMin = panelPos;
             nextPanelHeaderMax = ImVec2(panelPos.x + panelSize.x, panelPos.y + panelHeaderH);
             BeginPanelNoScroll("CallPanel", panelPos, panelSize, panelAlpha, panelFade, basePad);
+            if (PanelCloseButton(ctx.tune))
+                app.showCall = false;
             ImGui::AlignTextToFramePadding();
             if (font22)
                 ImGui::PushFont(font22);
@@ -615,6 +1201,49 @@ void DrawCallPanel(PanelContext& ctx) {
             }
             ImGui::TextDisabled("Threshold is a noise gate. 0%% sends all mic input.");
 
+            // Live mic level meter: eased rise, slow decay, red zone near clipping,
+            // and a tick showing where the noise gate sits. Live during a call.
+            {
+                const bool meterLive = session.voiceActive();
+                static float meterLevel = 0.0f;
+                const float rawLevel = meterLive ? std::clamp(session.voiceInputLevel(), 0.0f, 1.0f)
+                                                 : 0.0f;
+                const float dtMeter = ImGui::GetIO().DeltaTime;
+                if (rawLevel > meterLevel)
+                    meterLevel += (rawLevel - meterLevel) * std::min(1.0f, dtMeter * 30.0f);
+                else
+                    meterLevel += (rawLevel - meterLevel) * std::min(1.0f, dtMeter * 6.0f);
+
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("Mic level");
+                ImGui::SameLine();
+                ImDrawList* mdl = ImGui::GetWindowDrawList();
+                const float meterH = ImGui::GetTextLineHeight() * 0.6f;
+                const float meterW = ImGui::GetContentRegionAvail().x - ctx.tune(6.0f);
+                const ImVec2 mMin(ImGui::GetCursorScreenPos().x,
+                                  ImGui::GetCursorScreenPos().y +
+                                      (ImGui::GetFrameHeight() - meterH) * 0.5f);
+                const ImVec2 mMax(mMin.x + meterW, mMin.y + meterH);
+                ImGui::Dummy(ImVec2(meterW, ImGui::GetFrameHeight()));
+                mdl->AddRectFilled(mMin, mMax, ImGui::GetColorU32(ImVec4(1, 1, 1, 0.08f)),
+                                   meterH * 0.5f);
+                if (meterLevel > 0.003f) {
+                    const float fillW = meterW * meterLevel;
+                    ImVec4 fillCol = ImGui::GetStyle().Colors[ImGuiCol_CheckMark];
+                    if (meterLevel > 0.85f)
+                        fillCol = ImVec4(0.95f, 0.36f, 0.30f, 1.0f); // clipping
+                    mdl->AddRectFilled(mMin, ImVec2(mMin.x + fillW, mMax.y),
+                                       ImGui::GetColorU32(fillCol), meterH * 0.5f);
+                }
+                if (app.voiceInputThreshold > 0.001f) {
+                    const float tx = mMin.x + meterW * std::clamp(app.voiceInputThreshold, 0.0f, 1.0f);
+                    mdl->AddLine(ImVec2(tx, mMin.y - 2.0f), ImVec2(tx, mMax.y + 2.0f),
+                                 ImGui::GetColorU32(ImVec4(1, 1, 1, 0.45f)), 1.5f);
+                }
+                if (!meterLive)
+                    ImGui::TextDisabled("Meter is live during a voice call.");
+            }
+
             if (ImGui::SliderFloat("Voice Volume", &app.voiceVolume, 0.0f, 100.0f, "%.0f")) {
                 session.setVoiceVolume(app.voiceVolume);
                 app.dirty = true;
@@ -642,6 +1271,7 @@ void DrawCallPanel(PanelContext& ctx) {
                 app.showChat = false;
                 app.showSubs = false;
                 app.showSettings = false;
+                app.showPlaylist = false;
             }
 
             if (!app.voiceEnabled)
@@ -693,6 +1323,8 @@ void DrawSubsPanel(PanelContext& ctx) {
             nextPanelHeaderMin = panelPos;
             nextPanelHeaderMax = ImVec2(panelPos.x + panelSize.x, panelPos.y + panelHeaderH);
             BeginPanelNoScroll("SubsPanel", panelPos, panelSize, panelAlpha, panelFade, basePad);
+            if (PanelCloseButton(ctx.tune))
+                app.showSubs = false;
             ImGui::AlignTextToFramePadding();
             if (font22)
                 ImGui::PushFont(font22);
@@ -700,17 +1332,23 @@ void DrawSubsPanel(PanelContext& ctx) {
             if (font22)
                 ImGui::PopFont();
             ImGui::Separator();
-            if (ImGui::Button("Open Subtitle File"))
-                openSubtitles();
-            ImGui::Separator();
+            const float rowLabelW = ctx.tune(150.0f);
+            // Scroll region so long content (search results + style + preview)
+            // can never clip past the panel's bottom edge.
+            ImGui::BeginChild("SubsScroll", ImVec2(0.0f, 0.0f), false);
 
+            PanelSection("Track");
             bool subVisible = mpv_get_flag(mpv, "sub-visibility", true);
             app.subtitlesEnabled = subVisible;
             if (ImGui::Checkbox("Subtitles enabled", &subVisible)) {
                 app.subtitlesEnabled = subVisible;
                 mpv_set_flag(mpv, "sub-visibility", subVisible);
             }
-            if (ImGui::SliderFloat("Delay (s)", &app.subtitleDelay, -10.0f, 10.0f, "%.1f")) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Open subtitle file..."))
+                openSubtitles();
+            if (SliderRow("Delay (s)", "##subdelay", &app.subtitleDelay, -10.0f, 10.0f, "%.1f",
+                          0.0f, rowLabelW)) {
                 double delay = app.subtitleDelay;
                 mpv_set_property(mpv, "sub-delay", MPV_FORMAT_DOUBLE, &delay);
                 app.dirty = true;
@@ -752,7 +1390,8 @@ void DrawSubsPanel(PanelContext& ctx) {
             cstr.reserve(labels.size());
             for (auto& l : labels)
                 cstr.push_back(l.c_str());
-            if (ImGui::Combo("Track", &currentIndex, cstr.data(), static_cast<int>(cstr.size()))) {
+            PanelRowLabel("Track", rowLabelW);
+            if (ImGui::Combo("##subtrack", &currentIndex, cstr.data(), static_cast<int>(cstr.size()))) {
                 int selected = ids[static_cast<size_t>(currentIndex)];
                 if (selected == 0) {
                     mpv_set_property_string(mpv, "sid", "no");
@@ -764,8 +1403,7 @@ void DrawSubsPanel(PanelContext& ctx) {
                 }
             }
 
-            ImGui::Separator();
-            ImGui::TextUnformatted("Online Search");
+            PanelSection("Online Search");
             {
                 const OsSnapshot os = OsGetSnapshot();
                 char* mpvPath = mpv_get_property_string(mpv, "path");
@@ -773,16 +1411,18 @@ void DrawSubsPanel(PanelContext& ctx) {
                 if (mpvPath)
                     mpv_free(mpvPath);
 
-                if (ImGui::InputText("API Key", app.openSubsApiKey, sizeof(app.openSubsApiKey),
+                PanelRowLabel("API key", rowLabelW);
+                if (ImGui::InputText("##oskey", app.openSubsApiKey, sizeof(app.openSubsApiKey),
                                      ImGuiInputTextFlags_Password))
                     app.dirty = true;
                 if (app.openSubsApiKey[0] == '\0') {
-                    ImGui::SameLine();
-                    if (ImGui::TextLink("Get one"))
+                    ImGui::SetCursorPosX(rowLabelW);
+                    if (ImGui::TextLink("Get a free key from opensubtitles.com"))
                         ctx.openUrl("https://www.opensubtitles.com/consumers");
                 }
+                PanelRowLabel("Languages", rowLabelW);
                 ImGui::SetNextItemWidth(ctx.tune(120.0f));
-                if (ImGui::InputText("Languages", app.openSubsLangs, sizeof(app.openSubsLangs)))
+                if (ImGui::InputText("##oslangs", app.openSubsLangs, sizeof(app.openSubsLangs)))
                     app.dirty = true;
                 if (ImGui::IsItemHovered())
                     ShowDelayedTooltip("Comma-separated codes, e.g. en,fa");
@@ -805,9 +1445,17 @@ void DrawSubsPanel(PanelContext& ctx) {
 
                 if (!os.message.empty() && os.phase != OsPhase::Idle) {
                     const bool isError = os.phase == OsPhase::Error;
+                    std::string osMsg = os.message;
+                    if (busy) {
+                        // Animated working dots while the background thread runs.
+                        const int dots = static_cast<int>(ImGui::GetTime() * 2.5) % 4;
+                        while (!osMsg.empty() && osMsg.back() == '.')
+                            osMsg.pop_back();
+                        osMsg.append(static_cast<size_t>(dots), '.');
+                    }
                     ImGui::TextColored(isError ? ImVec4(0.95f, 0.34f, 0.28f, 1.0f)
                                                : ImGui::GetStyle().Colors[ImGuiCol_TextDisabled],
-                                       "%s", os.message.c_str());
+                                       "%s", osMsg.c_str());
                 }
                 if (os.phase == OsPhase::Downloaded && !os.downloadedPath.empty()) {
                     const char* cmd[] = {"sub-add", os.downloadedPath.c_str(), "select", nullptr};
@@ -848,17 +1496,14 @@ void DrawSubsPanel(PanelContext& ctx) {
                 }
             }
 
-            ImGui::Separator();
-            ImGui::TextUnformatted("Style");
-            if (ImGui::InputText("Font", app.subtitleFont, sizeof(app.subtitleFont),
-                                 ImGuiInputTextFlags_AutoSelectAll)) {
-                applySubtitleStyle();
-            }
-            if (ImGui::SliderFloat("Size", &app.subtitleFontSize, 12.0f, 72.0f, "%.0f"))
+            PanelSection("Style");
+            if (SliderRow("Size", "##subsize", &app.subtitleFontSize, 12.0f, 72.0f, "%.0f",
+                          36.0f, rowLabelW))
                 applySubtitleStyle();
             float subCol4[4] = {app.subtitleColor[0], app.subtitleColor[1],
                                 app.subtitleColor[2], app.subtitleOpacity};
-            if (ImGui::ColorEdit4("Color", subCol4,
+            PanelRowLabel("Colour", rowLabelW);
+            if (ImGui::ColorEdit4("##subcolor", subCol4,
                                   ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_AlphaBar)) {
                 app.subtitleColor[0] = subCol4[0];
                 app.subtitleColor[1] = subCol4[1];
@@ -871,11 +1516,53 @@ void DrawSubsPanel(PanelContext& ctx) {
             ImGui::SameLine();
             if (ImGui::Checkbox("Italic", &app.subtitleItalic))
                 applySubtitleStyle();
-            if (ImGui::SliderFloat("Outline", &app.subtitleBorderSize, 0.0f, 8.0f, "%.1f"))
+            if (SliderRow("Outline", "##suboutline", &app.subtitleBorderSize, 0.0f, 8.0f, "%.1f",
+                          2.0f, rowLabelW))
                 applySubtitleStyle();
-            if (ImGui::SliderFloat("Position (%)", &app.subtitlePos, 0.0f, 100.0f, "%.0f"))
+            if (SliderRow("Position (%)", "##subpos", &app.subtitlePos, 0.0f, 100.0f, "%.0f",
+                          90.0f, rowLabelW))
                 applySubtitleStyle();
-            if (ImGui::Button("Reset Style")) {
+
+            // Live preview: a dark stand-in for the video with the sample line
+            // rendered at a proportional size, with colour/outline/position applied.
+            {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                const float pvW = ImGui::GetContentRegionAvail().x;
+                const float pvH = ctx.tune(72.0f);
+                const ImVec2 pvMin = ImGui::GetCursorScreenPos();
+                const ImVec2 pvMax(pvMin.x + pvW, pvMin.y + pvH);
+                ImGui::Dummy(ImVec2(pvW, pvH));
+                dl->AddRectFilled(pvMin, pvMax,
+                                  ImGui::ColorConvertFloat4ToU32(ImVec4(0.03f, 0.04f, 0.05f, 1.0f)),
+                                  ctx.tune(8.0f));
+                dl->AddRect(pvMin, pvMax, ImGui::GetColorU32(ImVec4(1, 1, 1, 0.10f)), ctx.tune(8.0f));
+                const char* sample = "The quick brown fox jumps";
+                ImFont* pvFont = ImGui::GetFont();
+                const float pvSize = std::clamp(app.subtitleFontSize * 0.55f, 10.0f, pvH * 0.42f);
+                const ImVec2 ts = pvFont->CalcTextSizeA(pvSize, FLT_MAX, 0.0f, sample);
+                const float tx = pvMin.x + (pvW - ts.x) * 0.5f;
+                // subtitlePos: 0 = top of frame, 100 = bottom.
+                const float usable = pvH - ts.y - ctx.tune(10.0f);
+                const float ty = pvMin.y + ctx.tune(5.0f) +
+                                 usable * std::clamp(app.subtitlePos / 100.0f, 0.0f, 1.0f);
+                const float ol = app.subtitleBorderSize * 0.6f;
+                if (ol > 0.05f) {
+                    const ImU32 olCol = IM_COL32(0, 0, 0, 230);
+                    const float o = std::max(1.0f, ol);
+                    for (int oy = -1; oy <= 1; ++oy)
+                        for (int ox = -1; ox <= 1; ++ox)
+                            if (ox || oy)
+                                dl->AddText(pvFont, pvSize, ImVec2(tx + ox * o, ty + oy * o),
+                                            olCol, sample);
+                }
+                dl->AddText(pvFont, pvSize, ImVec2(tx, ty),
+                            ImGui::ColorConvertFloat4ToU32(
+                                ImVec4(app.subtitleColor[0], app.subtitleColor[1],
+                                       app.subtitleColor[2], app.subtitleOpacity)),
+                            sample);
+            }
+
+            if (ImGui::SmallButton("Reset style")) {
                 app.subtitleFont[0] = '\0';
                 app.subtitleFontSize = 36.0f;
                 app.subtitleColor[0] = 1.0f;
@@ -894,6 +1581,7 @@ void DrawSubsPanel(PanelContext& ctx) {
                 app.subtitleItalic = false;
                 applySubtitleStyle();
             }
+            ImGui::EndChild();
 
             if (ImGui::IsWindowHovered(hoverFlags))
                 uiHovered = true;
@@ -1285,6 +1973,20 @@ void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& pane
             // Lines present on the very first drawn frame are history: stamp them
             // with 0 so only genuinely new messages play the entrance animation.
             static bool chatHistoryStamped = false;
+            if (chatN == 0) {
+                // Friendly empty state, centred in the scroll region.
+                const char* hi1 = "No messages yet";
+                const char* hi2 = "Say hi to your watch party";
+                const float availH = ImGui::GetContentRegionAvail().y;
+                const float availW = ImGui::GetContentRegionAvail().x;
+                ImGui::Dummy(ImVec2(0.0f, std::max(0.0f, availH * 0.42f - ImGui::GetTextLineHeight())));
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                                     std::max(0.0f, (availW - ImGui::CalcTextSize(hi1).x) * 0.5f));
+                ImGui::TextUnformatted(hi1);
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                                     std::max(0.0f, (availW - ImGui::CalcTextSize(hi2).x) * 0.5f));
+                ImGui::TextDisabled("%s", hi2);
+            }
             for (int i = 0; i < chatN; ++i) {
                 ChatLine& line = app.chat[static_cast<size_t>(i)];
                 ImGui::PushID(i);

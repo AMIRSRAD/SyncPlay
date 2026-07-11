@@ -2,6 +2,7 @@
 
 #include <shellapi.h>
 #include <shobjidl.h>
+#include <ole2.h>
 #include <dwmapi.h>
 #include <tchar.h>
 #include <algorithm>
@@ -69,6 +70,8 @@ bool g_pendingDrop = false;
 bool g_pendingDpiChange = false;
 unsigned int g_pendingDpiValue = 96;
 std::vector<std::wstring> g_dropPaths;
+std::vector<std::wstring> g_ipcOpenPaths;
+bool g_pendingIpcOpen = false;
 SwRenderState* g_renderState = nullptr;
 std::atomic<bool> g_requestExit{false};
 std::atomic<bool> g_inSizing{false};
@@ -290,6 +293,118 @@ void CleanupTaskbar() {
     g_thumbButtonsAdded = false;
 }
 
+// ---- OLE drop target ---------------------------------------------------------
+// Replaces DragAcceptFiles/WM_DROPFILES so we get drag-enter/leave notifications
+// and can render a drop overlay while files hover over the window.
+
+bool g_dropHovering = false;
+
+namespace {
+class FileDropTarget final : public IDropTarget {
+public:
+    // The object lives for the window's lifetime; ref-counting is nominal.
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv)
+            return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_IDropTarget) {
+            *ppv = static_cast<IDropTarget*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&m_ref); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG r = InterlockedDecrement(&m_ref);
+        if (r == 0)
+            delete this;
+        return r;
+    }
+
+    HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* data, DWORD, POINTL, DWORD* effect) override {
+        m_hasFiles = HasFileDrop(data);
+        g_dropHovering = m_hasFiles;
+        if (effect)
+            *effect = m_hasFiles ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL, DWORD* effect) override {
+        if (effect)
+            *effect = m_hasFiles ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DragLeave() override {
+        g_dropHovering = false;
+        m_hasFiles = false;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Drop(IDataObject* data, DWORD, POINTL, DWORD* effect) override {
+        g_dropHovering = false;
+        m_hasFiles = false;
+        if (effect)
+            *effect = DROPEFFECT_COPY;
+        FORMATETC fmt{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+        STGMEDIUM stg{};
+        if (!data || FAILED(data->GetData(&fmt, &stg)))
+            return S_OK;
+        if (HDROP drop = static_cast<HDROP>(GlobalLock(stg.hGlobal))) {
+            const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+            g_dropPaths.clear();
+            for (UINT i = 0; i < count; ++i) {
+                wchar_t path[MAX_PATH] = {};
+                if (DragQueryFileW(drop, i, path, MAX_PATH))
+                    g_dropPaths.emplace_back(path);
+            }
+            if (!g_dropPaths.empty())
+                g_pendingDrop = true;
+            GlobalUnlock(stg.hGlobal);
+        }
+        ReleaseStgMedium(&stg);
+        return S_OK;
+    }
+
+private:
+    static bool HasFileDrop(IDataObject* data) {
+        if (!data)
+            return false;
+        FORMATETC fmt{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+        return data->QueryGetData(&fmt) == S_OK;
+    }
+
+    LONG m_ref = 1;
+    bool m_hasFiles = false;
+};
+
+FileDropTarget* g_dropTarget = nullptr;
+bool g_oleInitialized = false;
+} // namespace
+
+bool RegisterFileDropTarget(HWND hWnd) {
+    if (!g_oleInitialized) {
+        const HRESULT hr = OleInitialize(nullptr);
+        g_oleInitialized = (hr == S_OK || hr == S_FALSE);
+        if (!g_oleInitialized)
+            return false;
+    }
+    if (!g_dropTarget)
+        g_dropTarget = new FileDropTarget();
+    return SUCCEEDED(RegisterDragDrop(hWnd, g_dropTarget));
+}
+
+void RevokeFileDropTarget(HWND hWnd) {
+    if (hWnd)
+        RevokeDragDrop(hWnd);
+    if (g_dropTarget) {
+        g_dropTarget->Release();
+        g_dropTarget = nullptr;
+    }
+    if (g_oleInitialized) {
+        OleUninitialize();
+        g_oleInitialized = false;
+    }
+}
+
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     const bool imguiHandled = ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
 
@@ -462,6 +577,21 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         else if (wParam == VK_ESCAPE && g_fullscreen)
             g_pendingToggleFullscreen = true;
         return 0;
+    case WM_COPYDATA: {
+        // A second instance (spawned by Explorer per selected file) forwards its
+        // argument here, then exits. Magic 'SPL1' guards against stray messages.
+        const auto* cds = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
+        if (cds && cds->dwData == 0x53504C31 && cds->lpData && cds->cbData >= sizeof(wchar_t)) {
+            const wchar_t* text = static_cast<const wchar_t*>(cds->lpData);
+            const size_t maxChars = cds->cbData / sizeof(wchar_t);
+            const size_t len = wcsnlen(text, maxChars);
+            if (len > 0) {
+                g_ipcOpenPaths.emplace_back(text, text + len);
+                g_pendingIpcOpen = true;
+            }
+        }
+        return TRUE;
+    }
     case WM_COMMAND:
         // Taskbar thumbnail toolbar buttons.
         if (HIWORD(wParam) == THBN_CLICKED) {

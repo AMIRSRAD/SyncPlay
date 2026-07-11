@@ -18,9 +18,11 @@ host-relay server.
 
 **Playback**
 - Local video through libmpv (MKV / MP4 / MOV / AVI / WebM), with **GPU decoding**.
-- **Network streams by URL** — `Ctrl+U` or right-click → *Open URL…*: direct media
-  links, HLS (`.m3u8`), DASH, internet radio — anything mpv/ffmpeg can play.
-- Playlist / queue: drag-drop multiple files (or multi-select), next/prev, auto-advance.
+- **Network streams by URL** — paste a link with `Ctrl+V`, press `Ctrl+U`, use the
+  idle-screen field, or right-click → *Open URL…*: direct media links, HLS
+  (`.m3u8`), DASH, internet radio — anything mpv/ffmpeg can play.
+- Playlist / queue panel: drag-drop multiple files (or multi-select),
+  drag-to-reorder, inline play/remove, next/prev, auto-advance.
 - **Resume where you left off** — playback position is remembered per file.
 - Subtitle & audio track controls; subtitle styling (font, size, colour, position, outline).
 - **OpenSubtitles** online search & download (bring your own free API key).
@@ -92,7 +94,8 @@ Do not use `localhost` or `127.0.0.1` from the guest machine.
 
 ## Watch A Stream Together
 
-1. Host: **Ctrl+U** → paste a direct media / HLS / DASH URL → **Open**.
+1. Host: **Ctrl+U** (or paste a link with **Ctrl+V**, or use the idle-screen
+   *Stream* field) → a direct media / HLS / DASH URL → **Open**.
 2. In a session, guests get a "watch together" prompt for that URL — accept to join in.
 3. Everyone streams the same source; sync works exactly as with local files.
 

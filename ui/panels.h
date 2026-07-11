@@ -74,10 +74,16 @@ struct PanelContext {
 
     // Open a URL in the user's default browser (used by the About section).
     std::function<void(const std::string&)> openUrl;
+    // Builds the syncplay:// invite deep link for the active session ("" if none).
+    std::function<std::string()> buildInviteLink;
+    // Load a local file as the current media (loadfile + local-file identity +
+    // scrub reset). Used by the playlist panel when the queue is empty.
+    std::function<void(const std::wstring&)> playLocalFile;
 };
 
 void DrawSettingsPanel(PanelContext& ctx);
 void DrawSessionPanel(PanelContext& ctx);
+void DrawPlaylistPanel(PanelContext& ctx);
 void DrawCallPanel(PanelContext& ctx);
 void DrawSubsPanel(PanelContext& ctx);
 void DrawChatPanel(PanelContext& ctx, const ImVec2& panelPos, const ImVec2& panelSize,

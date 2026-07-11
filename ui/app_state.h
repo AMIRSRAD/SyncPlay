@@ -58,6 +58,7 @@ struct AppState {
     bool showChat = false;
     bool showCall = false;
     bool showSubs = false;
+    bool showPlaylist = false;
     bool showSettings = false;
     bool showEmoji = false;
     bool dirty = false;

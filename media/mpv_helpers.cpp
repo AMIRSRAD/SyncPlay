@@ -114,3 +114,35 @@ std::vector<PlaylistItem> mpv_read_playlist(mpv_handle* mpv) {
     mpv_free_node_contents(&node);
     return items;
 }
+
+std::vector<AudioDeviceInfo> mpv_read_audio_devices(mpv_handle* mpv) {
+    std::vector<AudioDeviceInfo> devices;
+    mpv_node node;
+    if (mpv_get_property(mpv, "audio-device-list", MPV_FORMAT_NODE, &node) < 0)
+        return devices;
+    if (node.format != MPV_FORMAT_NODE_ARRAY) {
+        mpv_free_node_contents(&node);
+        return devices;
+    }
+    auto* list = node.u.list;
+    devices.reserve(static_cast<size_t>(list->num));
+    for (int i = 0; i < list->num; ++i) {
+        mpv_node* item = &list->values[i];
+        if (item->format != MPV_FORMAT_NODE_MAP)
+            continue;
+        AudioDeviceInfo info;
+        auto* map = item->u.list;
+        for (int j = 0; j < map->num; ++j) {
+            const char* key = map->keys[j];
+            const mpv_node& val = map->values[j];
+            if (strcmp(key, "name") == 0 && val.format == MPV_FORMAT_STRING)
+                info.name = val.u.string ? val.u.string : "";
+            else if (strcmp(key, "description") == 0 && val.format == MPV_FORMAT_STRING)
+                info.description = val.u.string ? val.u.string : "";
+        }
+        if (!info.name.empty())
+            devices.push_back(std::move(info));
+    }
+    mpv_free_node_contents(&node);
+    return devices;
+}

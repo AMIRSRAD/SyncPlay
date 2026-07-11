@@ -62,6 +62,8 @@ public:
     bool voiceActive() const;
     bool voiceAvailable() const;
     bool voiceMuted() const;
+    // Live microphone peak (0..1) while the capture device runs; 0 otherwise.
+    float voiceInputLevel() const;
     std::string voiceState() const;
     std::vector<VoiceCaptureDevice> voiceCaptureDevices() const;
 
@@ -73,6 +75,8 @@ public:
     bool isHost() const;
     bool sessionActive() const;
     bool transportConnected() const;
+    int guestCount() const;
+    bool hostOnline() const;
     std::string transportState() const;
     double syncDriftSeconds() const;
     std::string syncConfidenceText() const;

@@ -73,6 +73,39 @@ void PopIconGlowOffset() {
         g_glowOffsetStack.pop_back();
 }
 
+void PanelSection(const char* label) {
+    ImGui::Spacing();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    const float lineH = ImGui::GetTextLineHeight();
+    const float pipW = 3.0f;
+    const float pipH = lineH * 0.9f;
+    dl->AddRectFilled(ImVec2(pos.x, pos.y + (lineH - pipH) * 0.5f),
+                      ImVec2(pos.x + pipW, pos.y + (lineH + pipH) * 0.5f),
+                      ImGui::GetColorU32(ImGui::GetStyle().Colors[ImGuiCol_CheckMark]),
+                      pipW * 0.5f);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + pipW + 7.0f);
+    ImVec4 lbl = ImGui::GetStyle().Colors[ImGuiCol_Text];
+    lbl.w *= 0.85f;
+    ImGui::PushStyleColor(ImGuiCol_Text, lbl);
+    ImGui::TextUnformatted(label);
+    ImGui::PopStyleColor();
+    const ImVec2 tEnd = ImGui::GetItemRectMax();
+    const float lineY = pos.y + lineH * 0.55f;
+    const float xEnd = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+    if (xEnd > tEnd.x + 14.0f)
+        dl->AddLine(ImVec2(tEnd.x + 10.0f, lineY), ImVec2(xEnd, lineY),
+                    ImGui::GetColorU32(ImGuiCol_Separator));
+    ImGui::Spacing();
+}
+
+void PanelRowLabel(const char* label, float labelWidth) {
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(label);
+    ImGui::SameLine(labelWidth);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+}
+
 void StyledTooltip(const char* text) {
     if (!text || !text[0])
         return;

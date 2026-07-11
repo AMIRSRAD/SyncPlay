@@ -33,6 +33,9 @@ public:
     void setCaptureDeviceIndex(int index);
     bool inputMuted() const;
     float inputThreshold() const;
+    // Peak of the last captured buffer, 0..1 (updates while the device runs,
+    // even when muted, so a level meter can confirm the mic works).
+    float inputLevel() const;
     int captureDeviceIndex() const;
     static std::vector<VoiceCaptureDevice> captureDevices();
 
@@ -57,6 +60,7 @@ private:
     int m_captureDeviceIndex = -1;
     std::atomic<float> m_outputGain{1.0f};
     std::atomic<float> m_inputThreshold{0.0f};
+    std::atomic<float> m_inputLevel{0.0f};
     std::atomic_bool m_inputMuted{true};
     std::atomic_bool m_active{false};
     std::string m_connectionState;

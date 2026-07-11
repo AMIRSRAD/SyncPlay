@@ -840,6 +840,43 @@ void RegisterSyncplayProtocol() {
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lpCmdLine, _In_ int) {
     InstallCrashHandler();
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+    // Single-instance forwarding: Explorer launches one process per selected file
+    // ("open" verb is "%1"), so when another instance is already running and we
+    // were given arguments, hand them over via WM_COPYDATA and exit — the files
+    // land in the running instance's queue like in VLC. Launching with NO
+    // arguments still opens a normal second instance (handy for testing sessions).
+    CreateMutexW(nullptr, FALSE, L"Local\\SyncPlay_SingleInstance"); // held for process lifetime
+    const bool anotherInstance = (GetLastError() == ERROR_ALREADY_EXISTS);
+    if (anotherInstance && lpCmdLine && lpCmdLine[0]) {
+        if (HWND target = FindWindowW(L"SyncPlay", nullptr)) {
+            int argcFwd = 0;
+            LPWSTR* argvFwd = CommandLineToArgvW(GetCommandLineW(), &argcFwd);
+            bool sent = false;
+            for (int i = 1; argvFwd && i < argcFwd; ++i) {
+                if (!argvFwd[i] || !argvFwd[i][0])
+                    continue;
+                COPYDATASTRUCT cds{};
+                cds.dwData = 0x53504C31; // 'SPL1'
+                cds.cbData = static_cast<DWORD>((wcslen(argvFwd[i]) + 1) * sizeof(wchar_t));
+                cds.lpData = argvFwd[i];
+                DWORD_PTR ignored = 0;
+                if (SendMessageTimeoutW(target, WM_COPYDATA, 0,
+                                        reinterpret_cast<LPARAM>(&cds),
+                                        SMTO_ABORTIFHUNG, 3000, &ignored))
+                    sent = true;
+            }
+            if (argvFwd)
+                LocalFree(argvFwd);
+            if (sent) {
+                if (IsIconic(target))
+                    ShowWindow(target, SW_RESTORE);
+                SetForegroundWindow(target);
+                return 0;
+            }
+        }
+    }
+
     RegisterSyncplayProtocol();
     // A syncplay:// invite link on the command line triggers an auto-join once
     // the session machinery is up.
@@ -909,7 +946,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                             nullptr, nullptr, wc.hInstance, nullptr);
     ApplyCustomWindowChrome(g_hWnd);
 
-    DragAcceptFiles(g_hWnd, TRUE);
+    // OLE drop target (drag-enter feedback + drop). Falls back to the classic
+    // WM_DROPFILES path if OLE registration fails.
+    if (!RegisterFileDropTarget(g_hWnd))
+        DragAcceptFiles(g_hWnd, TRUE);
 
     if (!CreateDeviceD3D(g_hWnd)) {
         CleanupDeviceD3D();
@@ -1059,6 +1099,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
             0xE76E, 0xE76E, // emoji (reactions)
             0xE767, 0xE769, // volume/play/pause
             0xE77A, 0xE77A, // unpin
+            0xE7A7, 0xE7A7, // undo (slider row reset)
             0xE7C2, 0xE7C2, // resize
             0xE823, 0xE823, // clock
             0xE840, 0xE840, // pin
@@ -1622,6 +1663,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         session.shareOpenUrl(url);
     };
 
+    auto playLocalFile = [&](const std::wstring& path) {
+        if (path.empty())
+            return;
+        const std::string utf8 = Utf8FromWide(path);
+        const char* cmd[] = { "loadfile", utf8.c_str(), nullptr };
+        mpv_command(mpv, cmd);
+        setLocalFileWide(path);
+        resetScrubState();
+    };
+
     auto openSubtitles = [&]() {
         const std::wstring path = openFileDialog(g_hWnd,
                                                  L"Subtitle Files\0*.srt;*.ass;*.vtt\0All Files\0*.*\0",
@@ -1654,6 +1705,17 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
             return;
         const std::wstring wide = WideFromUtf8(url);
         ShellExecuteW(nullptr, L"open", wide.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    };
+
+    auto buildInviteLink = [&]() -> std::string {
+        const std::string code = session.sessionCode();
+        if (code.empty())
+            return {};
+        std::string link = "syncplay://join?code=" + UrlEncodeComponent(code);
+        const std::string url = session.serverUrl();
+        if (!url.empty())
+            link += "&url=" + UrlEncodeComponent(url);
+        return link;
     };
 
     // Maintain the "Continue watching" list: move/insert `path` at the front
@@ -1865,21 +1927,34 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
     applyVideoShaders(false);
     applySubtitleStyle(false);
 
+    // Seek feedback pill over the video (YouTube-style), replacing corner toasts.
+    double seekPillAt = -10.0;
+    double seekPillDelta = 0.0;
+    auto showSeekPill = [&](double delta) {
+        // Accumulate rapid presses ("+5s" -> "+10s") while the pill is visible.
+        if (ImGui::GetTime() - seekPillAt < 0.8 &&
+            ((delta > 0.0) == (seekPillDelta > 0.0)))
+            seekPillDelta += delta;
+        else
+            seekPillDelta = delta;
+        seekPillAt = ImGui::GetTime();
+    };
     auto seekBy = [&](double delta) {
+        char seekToast[24];
+        std::snprintf(seekToast, sizeof(seekToast), "%s%.0fs", delta >= 0.0 ? "+" : "-",
+                      std::abs(delta));
         if (requestOnly()) {
             session.requestSeekDelta(delta);
-            char buf[32];
-            std::snprintf(buf, sizeof(buf), "%s%.0fs", (delta >= 0.0) ? "+" : "-", std::abs(delta));
-            pushOsd(buf);
+            showSeekPill(delta);
+            pushOsd(seekToast);
             return;
         }
         const double pos = mpv_get_double(mpv, "time-pos", 0.0);
         double seek = pos + delta;
         mpv_set_property(mpv, "time-pos", MPV_FORMAT_DOUBLE, &seek);
         session.notifyLocalAction();
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), "%s%.0fs", (delta >= 0.0) ? "+" : "-", std::abs(delta));
-        pushOsd(buf);
+        showSeekPill(delta);
+        pushOsd(seekToast);
     };
 
     int argcW = 0;
@@ -1987,6 +2062,51 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                 g_dropPaths.clear();
             }
             g_pendingDrop = false;
+        }
+
+        // Files/links forwarded from other instances (Explorer multi-select open):
+        // first file plays when nothing is loaded, everything else queues up.
+        if (g_pendingIpcOpen) {
+            bool haveQueue = playlistCount > 0;
+            int queued = 0;
+            for (const std::wstring& widePath : g_ipcOpenPaths) {
+                const std::string utf8 = Utf8FromWide(widePath);
+                if (utf8.empty())
+                    continue;
+                if (utf8.rfind("syncplay://", 0) == 0) {
+                    std::string linkUrl;
+                    std::string linkCode;
+                    if (ParseSyncplayLink(utf8, linkUrl, linkCode)) {
+                        const std::string joinUrl = linkUrl.empty() ? std::string(app.serverUrl)
+                                                                    : linkUrl;
+                        if (!joinUrl.empty()) {
+                            std::snprintf(app.serverUrl, sizeof(app.serverUrl), "%s", joinUrl.c_str());
+                            std::snprintf(app.joinCode, sizeof(app.joinCode), "%s", linkCode.c_str());
+                            session.joinSession(joinUrl, linkCode);
+                            app.showSession = true;
+                            app.events.push_back({"Joining session " + linkCode, 3.0f});
+                        }
+                    }
+                    continue;
+                }
+                if (!haveQueue) {
+                    const char* cmd[] = { "loadfile", utf8.c_str(), nullptr };
+                    mpv_command(mpv, cmd);
+                    setLocalFileWide(widePath);
+                    resetScrubState();
+                    haveQueue = true;
+                } else {
+                    const char* cmd[] = { "loadfile", utf8.c_str(), "append", nullptr };
+                    mpv_command(mpv, cmd);
+                }
+                ++queued;
+            }
+            if (queued > 1)
+                app.events.push_back({"Queued " + std::to_string(queued) + " files", 2.0f});
+            else if (queued == 1)
+                app.events.push_back({"Added to queue", 2.0f});
+            g_ipcOpenPaths.clear();
+            g_pendingIpcOpen = false;
         }
 
         for (;;) {
@@ -2115,7 +2235,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         const float barHeightUi = std::max(tune(50.0f), baseBarHeight - tune(43.0f));
         const int barHeightFb = g_fullscreen ? 0 : static_cast<int>(barHeightUi);
         const int marginY = g_fullscreen ? 0 : barHeightFb;
-        const bool anyRightOpen = app.showSession || app.showChat || app.showCall || app.showSubs || app.showSettings;
+        const bool anyRightOpen = app.showSession || app.showChat || app.showCall || app.showSubs ||
+                                  app.showSettings || app.showPlaylist;
         const bool chatSidebarMode = app.showChat && app.sidePanels;
         const bool chatDockedSidebar = chatSidebarMode;
         const bool sideLayout = chatSidebarMode;
@@ -2187,6 +2308,40 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
             bg->AddImage((ImTextureID)g_videoSrv, ImVec2(0, 0),
                          ImVec2(static_cast<float>(videoW), static_cast<float>(videoH)));
         }
+        // Idle "Continue watching" list, scanned up-front (every ~2s) because the
+        // whole idle column centres itself based on how many cards will show.
+        static std::vector<size_t> idleResume;
+        static double lastIdleScan = -10.0;
+        float idleShift = 0.0f;
+        if (!hasMedia) {
+            const double nowScan = ImGui::GetTime();
+            if (nowScan - lastIdleScan > 2.0) {
+                lastIdleScan = nowScan;
+                idleResume.clear();
+                for (size_t ri = 0; ri < app.recentMedia.size() && idleResume.size() < 4; ++ri) {
+                    const RecentMedia& r = app.recentMedia[ri];
+                    if (r.position < 30.0)
+                        continue; // barely started; not worth a card
+                    if (r.duration > 0.0 && r.position > r.duration * 0.97)
+                        continue; // effectively finished
+                    std::error_code ec;
+                    if (!std::filesystem::exists(std::filesystem::path(WideFromUtf8(r.path)), ec))
+                        continue;
+                    idleResume.push_back(ri);
+                }
+            }
+            // Column extents relative to the window centre with the base anchor:
+            // icon top at -216, buttons bottom at +32, plus the cards block.
+            const int cardCount = static_cast<int>(idleResume.size());
+            const float topRel = -tune(216.0f);
+            float bottomRel = tune(32.0f);
+            if (cardCount > 0) {
+                bottomRel += tune(56.0f) + // gap + "Continue watching" header
+                             static_cast<float>(cardCount) * tune(62.0f) +
+                             static_cast<float>(cardCount - 1) * tune(10.0f);
+            }
+            idleShift = -(topRel + bottomRel) * 0.5f;
+        }
         if (!hasMedia) {
             // Designed idle screen: a soft vertical gradient lifts the flat black,
             // with the app icon and a hint centered.
@@ -2196,7 +2351,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
             const ImU32 top = ImGui::GetColorU32(ImVec4(0.11f, 0.12f, 0.15f, 1.0f));
             const ImU32 bottom = ImGui::GetColorU32(ImVec4(0.04f, 0.04f, 0.06f, 1.0f));
             bg->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(W, H), top, top, bottom, bottom);
-            const ImVec2 center(W * 0.5f, H * 0.5f - tune(24.0f));
+            // Anchor the whole idle column (icon/hint/field/buttons/cards) so the
+            // ensemble is vertically centred rather than hanging below the middle.
+            const ImVec2 center(W * 0.5f, H * 0.5f - tune(150.0f) + idleShift);
             if (g_appIcon.srv && g_appIcon.width > 0 && g_appIcon.height > 0) {
                 const float iconSz = tune(132.0f);
                 bg->AddImage((ImTextureID)g_appIcon.srv,
@@ -2267,27 +2424,67 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         bool uiHovered = false;
         bool panelRectHovered = false;
 
-        // "Continue watching": resume cards on the idle screen, built from the
-        // persisted recent-media list. Refreshed every ~2s (existence checks).
-        if (!hasMedia && uiFade > 0.01f && !app.recentMedia.empty()) {
-            static std::vector<size_t> idleResume;
-            static double lastIdleScan = -10.0;
-            const double nowT = ImGui::GetTime();
-            if (nowT - lastIdleScan > 2.0) {
-                lastIdleScan = nowT;
-                idleResume.clear();
-                for (size_t ri = 0; ri < app.recentMedia.size() && idleResume.size() < 4; ++ri) {
-                    const RecentMedia& r = app.recentMedia[ri];
-                    if (r.position < 30.0)
-                        continue; // barely started; not worth a card
-                    if (r.duration > 0.0 && r.position > r.duration * 0.97)
-                        continue; // effectively finished
-                    std::error_code ec;
-                    if (!std::filesystem::exists(std::filesystem::path(WideFromUtf8(r.path)), ec))
-                        continue;
-                    idleResume.push_back(ri);
-                }
+        // Idle-screen stream field: paste a link and go, right under the hint.
+        if (!hasMedia && uiFade > 0.01f) {
+            static char idleUrl[1024] = "";
+            const float fieldW = std::min(tune(430.0f), static_cast<float>(ui_w) - tune(80.0f));
+            const float btnW = tune(78.0f);
+            const float fx = (static_cast<float>(ui_w) - fieldW) * 0.5f;
+            const float fy = static_cast<float>(ui_h) * 0.5f - tune(36.0f) + idleShift;
+            ImGui::SetCursorPos(ImVec2(fx, fy));
+            ImGui::SetNextItemWidth(fieldW - btnW - ImGui::GetStyle().ItemSpacing.x);
+            const bool idleSubmit = ImGui::InputTextWithHint(
+                "##idleurl", "Paste a stream link  (mp4, mkv, HLS ...)",
+                idleUrl, sizeof(idleUrl), ImGuiInputTextFlags_EnterReturnsTrue);
+            if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+                uiHovered = true;
+            std::string idleTrimmed = idleUrl;
+            while (!idleTrimmed.empty() && (idleTrimmed.front() == ' ' || idleTrimmed.front() == '"'))
+                idleTrimmed.erase(idleTrimmed.begin());
+            while (!idleTrimmed.empty() && (idleTrimmed.back() == ' ' || idleTrimmed.back() == '"'))
+                idleTrimmed.pop_back();
+            const bool idleValid = idleTrimmed.find("://") != std::string::npos &&
+                                   idleTrimmed.rfind("syncplay://", 0) != 0;
+            ImGui::SameLine();
+            if (!idleValid)
+                ImGui::BeginDisabled();
+            const bool idleGo = ImGui::Button("Stream", ImVec2(btnW, 0.0f));
+            if (!idleValid)
+                ImGui::EndDisabled();
+            if (ImGui::IsItemHovered())
+                uiHovered = true;
+            if ((idleSubmit || idleGo) && idleValid) {
+                openNetworkUrl(idleTrimmed);
+                idleUrl[0] = '\0';
             }
+
+            // Quick session actions: both land on the Session panel.
+            const float sbW = tune(150.0f);
+            const float sbGap = tune(10.0f);
+            ImGui::SetCursorPos(ImVec2((static_cast<float>(ui_w) - sbW * 2.0f - sbGap) * 0.5f,
+                                       static_cast<float>(ui_h) * 0.5f + tune(4.0f) + idleShift));
+            const auto openSessionPanel = [&]() {
+                app.showSession = true;
+                app.showCall = false;
+                app.showChat = false;
+                app.showSubs = false;
+                app.showSettings = false;
+                app.showPlaylist = false;
+            };
+            if (ImGui::Button("Create session", ImVec2(sbW, 0.0f)))
+                openSessionPanel();
+            if (ImGui::IsItemHovered())
+                uiHovered = true;
+            ImGui::SameLine(0.0f, sbGap);
+            if (ImGui::Button("Join session", ImVec2(sbW, 0.0f)))
+                openSessionPanel();
+            if (ImGui::IsItemHovered())
+                uiHovered = true;
+        }
+
+        // "Continue watching": resume cards on the idle screen (list scanned above,
+        // where the column-centring shift is computed).
+        if (!hasMedia && uiFade > 0.01f && !app.recentMedia.empty()) {
             if (!idleResume.empty()) {
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 ImFont* cardFont = fontChat ? fontChat : ImGui::GetFont();
@@ -2295,7 +2492,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                 const float cardH = tune(62.0f);
                 const float cardGap = tune(10.0f);
                 const float cardX = (static_cast<float>(ui_w) - cardW) * 0.5f;
-                float cardY = static_cast<float>(ui_h) * 0.5f + tune(118.0f);
+                float cardY = static_cast<float>(ui_h) * 0.5f + tune(88.0f) + idleShift;
                 const char* cwHeader = "Continue watching";
                 const ImVec2 cwSize = ImGui::CalcTextSize(cwHeader);
                 dl->AddText(ImVec2((static_cast<float>(ui_w) - cwSize.x) * 0.5f,
@@ -2636,7 +2833,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         const bool renderBottomBar = bottomAlpha > 0.01f;
         const bool renderDock = dockAlpha > 0.01f;
 
-        enum PanelId { PanelNone = 0, PanelSession = 1, PanelChat = 2, PanelCall = 3, PanelSubs = 4, PanelSettings = 5 };
+        enum PanelId { PanelNone = 0, PanelSession = 1, PanelChat = 2, PanelCall = 3, PanelSubs = 4, PanelSettings = 5, PanelPlaylist = 6 };
         static int lastPanel = PanelNone;
         if (app.showSession)
             lastPanel = PanelSession;
@@ -2648,6 +2845,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
             lastPanel = PanelSubs;
         if (app.showSettings)
             lastPanel = PanelSettings;
+        if (app.showPlaylist)
+            lastPanel = PanelPlaylist;
         if (!anyRightOpen && !renderDock)
             lastPanel = PanelNone;
 
@@ -2656,6 +2855,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         const bool callActive = app.showCall || (!anyRightOpen && renderDock && lastPanel == PanelCall);
         const bool subsActive = app.showSubs || (!anyRightOpen && renderDock && lastPanel == PanelSubs);
         const bool settingsActive = app.showSettings || (!anyRightOpen && renderDock && lastPanel == PanelSettings);
+        const bool playlistActive = app.showPlaylist || (!anyRightOpen && renderDock && lastPanel == PanelPlaylist);
         static bool chatSeenInitialized = false;
         static size_t chatSeenCount = 0;
         if (!chatSeenInitialized) {
@@ -2712,6 +2912,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                     app.showCall = false;
                     app.showSession = false;
                     app.showSettings = false;
+                    app.showPlaylist = false;
                 }
             }
             if (!hasMedia)
@@ -2732,6 +2933,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                     app.showSubs = false;
                     app.showSession = false;
                     app.showSettings = false;
+                    app.showPlaylist = false;
                 }
             }
             ImGui::SameLine();
@@ -2743,6 +2945,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                     app.showSubs = false;
                     app.showSession = false;
                     app.showSettings = false;
+                    app.showPlaylist = false;
                 }
             }
             if (chatUnreadCount > 0) {
@@ -2775,6 +2978,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                     app.showChat = false;
                     app.showCall = false;
                     app.showSettings = false;
+                    app.showPlaylist = false;
                 }
             }
             ImGui::SameLine();
@@ -2786,6 +2990,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                     app.showChat = false;
                     app.showCall = false;
                     app.showSession = false;
+                    app.showPlaylist = false;
                 }
             }
             if (ImGui::IsWindowHovered(hoverFlags))
@@ -3115,8 +3320,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
             ImGui::SameLine();
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 0.0f));
             if (IconButtonFont("PlaylistBtn", ICON_PLAYLIST.c_str(),
-                               "Playlist", fontIconsSmall, ImVec2(speedBtn, speedBtn)))
-                ImGui::OpenPopup("PlaylistPopup");
+                               "Playlist", fontIconsSmall, ImVec2(speedBtn, speedBtn))) {
+                app.showPlaylist = !app.showPlaylist;
+                if (app.showPlaylist) {
+                    app.showCall = false;
+                    app.showSubs = false;
+                    app.showChat = false;
+                    app.showSession = false;
+                    app.showSettings = false;
+                }
+            }
             ImGui::PopStyleVar();
             ImGui::SameLine();
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 0.0f));
@@ -3163,101 +3376,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                 ImGui::EndPopup();
             }
             ImGui::PopStyleVar(4);
-            ImGui::SetNextWindowSize(ImVec2(tune(320.0f), tune(220.0f)), ImGuiCond_Appearing);
-            ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, popupRound);
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, popupRound);
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, popupPad);
-            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, popupSpacing);
-            if (ImGui::BeginPopup("PlaylistPopup")) {
-                if (ImGui::IsWindowAppearing())
-                    playlistSelection = static_cast<int>(playlistPos);
-                if (ImGui::Button("Add")) {
-                    const std::vector<std::wstring> paths = openFileDialogMulti(
-                        g_hWnd,
-                        L"Video Files\0*.mp4;*.mkv;*.avi;*.mov;*.webm\0All Files\0*.*\0",
-                        L"Add to Playlist");
-                    bool firstLoadsNow = playlistCount <= 0;
-                    for (const std::wstring& path : paths) {
-                        const std::string utf8 = Utf8FromWide(path);
-                        if (firstLoadsNow) {
-                            const char* cmd[] = { "loadfile", utf8.c_str(), nullptr };
-                            mpv_command(mpv, cmd);
-                            setLocalFileWide(path);
-                            resetScrubState();
-                            firstLoadsNow = false;
-                        } else {
-                            const char* cmd[] = { "loadfile", utf8.c_str(), "append", nullptr };
-                            mpv_command(mpv, cmd);
-                        }
-                    }
-                    if (paths.size() > 1)
-                        app.events.push_back({"Added " + std::to_string(paths.size()) + " to playlist", 1.5f});
-                    else if (!paths.empty())
-                        app.events.push_back({"Added to playlist", 1.5f});
-                }
-                ImGui::SameLine();
-                const bool canRemove = playlistSelection >= 0 &&
-                                       playlistSelection < static_cast<int>(playlistCount);
-                if (!canRemove)
-                    ImGui::BeginDisabled();
-                if (ImGui::Button("Remove")) {
-                    const std::string idx = std::to_string(playlistSelection);
-                    const char* cmd[] = { "playlist-remove", idx.c_str(), nullptr };
-                    mpv_command(mpv, cmd);
-                    app.events.push_back({"Removed from playlist", 1.5f});
-                    if (playlistSelection >= static_cast<int>(playlistCount) - 1)
-                        playlistSelection = static_cast<int>(playlistCount) - 2;
-                    if (playlistSelection < 0)
-                        playlistSelection = -1;
-                }
-                if (!canRemove)
-                    ImGui::EndDisabled();
-                ImGui::SameLine();
-                const bool hasItems = playlistCount > 0;
-                if (!hasItems)
-                    ImGui::BeginDisabled();
-                if (ImGui::Button("Clear")) {
-                    const char* cmd[] = { "playlist-clear", nullptr };
-                    mpv_command(mpv, cmd);
-                    playlistSelection = -1;
-                    app.events.push_back({"Playlist cleared", 1.5f});
-                }
-                if (!hasItems)
-                    ImGui::EndDisabled();
-
-                ImGui::Separator();
-                ImGui::BeginChild("PlaylistList", ImVec2(0.0f, tune(150.0f)), true);
-                const auto playlistItems = mpv_read_playlist(mpv);
-                if (playlistItems.empty()) {
-                    ImGui::TextDisabled("Playlist is empty");
-                } else {
-                    for (const auto& item : playlistItems) {
-                        std::string label = item.title;
-                        if (label.empty()) {
-                            const std::filesystem::path path(item.filename);
-                            label = path.filename().string();
-                        }
-                        if (label.empty())
-                            label = "Item " + std::to_string(item.index + 1);
-                        if (item.current || item.index == playlistPos)
-                            label = "> " + label;
-                        const bool selected = item.index == playlistSelection;
-                        if (ImGui::Selectable(label.c_str(), selected))
-                            playlistSelection = item.index;
-                        if (ImGui::IsItemHovered() &&
-                            ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                            const std::string idx = std::to_string(item.index);
-                            const char* cmd[] = { "playlist-play-index", idx.c_str(), nullptr };
-                            mpv_command(mpv, cmd);
-                            app.events.push_back({"Playing selected", 1.2f});
-                        }
-                    }
-                }
-                ImGui::EndChild();
-                ImGui::EndPopup();
-            }
-            ImGui::PopStyleVar(4);
-
             ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, tune(10.0f));
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(tune(8.0f), tune(8.0f)));
             if (ImGui::BeginPopup("ReactPopup")) {
@@ -3458,6 +3576,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                     app.showChat = false;
                     app.showSubs = false;
                     app.showSettings = false;
+                    app.showPlaylist = false;
                     app.events.push_back({"Enable voice in Call first", 1.5f});
                 }
             }
@@ -3751,6 +3870,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
             openFolder, browseShareFile,
             ICON_OPEN, ICON_CHAT, ICON_OVERLAY, ICON_SIDEBAR, ICON_REACT,
             openUrl,
+            buildInviteLink,
+            playLocalFile,
         };
         auto clampPanelToArea = [&](float* pos, float* size, float minW, float minH, float maxW, float maxH) {
             size[0] = std::clamp(size[0], minW, maxW);
@@ -3854,6 +3975,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
             DrawSettingsPanel(panelCtx);
         }
 
+        if (playlistActive) {
+            DrawPlaylistPanel(panelCtx);
+        }
+
         lastPanelRectHovered = panelRectHovered;
         lastPanelHeaderValid = nextPanelHeaderValid;
         if (nextPanelHeaderValid) {
@@ -3866,6 +3991,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         const bool widgetFocused = ImGui::IsAnyItemFocused();
         static bool showShortcuts = false;
         static bool showOpenUrlDialog = false;
+        static std::string pendingPasteUrl; // Ctrl+V'd link awaiting confirmation
         if (!hasTextFocus && !widgetActive && !widgetFocused && !anyPopupOpen) {
             const bool ctrlDown = io.KeyCtrl;
             if (ImGui::IsKeyPressed(ImGuiKey_F1))
@@ -3874,6 +4000,22 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                 showShortcuts = false;
             if (ctrlDown && ImGui::IsKeyPressed(ImGuiKey_U))
                 showOpenUrlDialog = true;
+            if (ctrlDown && ImGui::IsKeyPressed(ImGuiKey_V)) {
+                // Paste-to-stream: if the clipboard holds a URL, offer to play it.
+                if (const char* clip = ImGui::GetClipboardText()) {
+                    std::string s = clip;
+                    const size_t nl = s.find_first_of("\r\n");
+                    if (nl != std::string::npos)
+                        s.resize(nl);
+                    while (!s.empty() && (s.front() == ' ' || s.front() == '"'))
+                        s.erase(s.begin());
+                    while (!s.empty() && (s.back() == ' ' || s.back() == '"'))
+                        s.pop_back();
+                    if (s.size() < 2048 && s.find("://") != std::string::npos &&
+                        s.rfind("syncplay://", 0) != 0)
+                        pendingPasteUrl = s;
+                }
+            }
             if (hasMedia && ImGui::IsKeyPressed(ImGuiKey_Space))
                 togglePlay();
             if (hasMedia && ImGui::IsKeyPressed(ImGuiKey_M))
@@ -3900,26 +4042,27 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, popupPad);
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, popupSpacing);
         if (ImGui::BeginPopup("VideoContext")) {
-            if (ImGui::MenuItem("Open"))
+            if (ImGui::MenuItem((ICON_OPEN + "  Open").c_str()))
                 openVideo();
             if (ImGui::MenuItem("Open URL...", "Ctrl+U"))
                 showOpenUrlDialog = true;
             if (!hasMedia)
                 ImGui::BeginDisabled();
-            if (ImGui::MenuItem("Open Subtitles"))
+            if (ImGui::MenuItem((ICON_SUBS + "  Open Subtitles").c_str()))
                 openSubtitles();
             ImGui::Separator();
-            if (ImGui::MenuItem(paused ? "Play" : "Pause"))
+            if (ImGui::MenuItem(paused ? (ICON_PLAY + "  Play").c_str()
+                                       : (ICON_PAUSE + "  Pause").c_str()))
                 togglePlay();
-            if (ImGui::MenuItem("Stop")) {
+            if (ImGui::MenuItem((ICON_STOP + "  Stop").c_str())) {
                 const char* cmd[] = { "stop", nullptr };
                 mpv_command(mpv, cmd);
             }
-            if (ImGui::MenuItem("Seek -10s"))
+            if (ImGui::MenuItem((ICON_REW + "  Seek -10s").c_str()))
                 seekBy(-10.0);
-            if (ImGui::MenuItem("Seek +10s"))
+            if (ImGui::MenuItem((ICON_FWD + "  Seek +10s").c_str()))
                 seekBy(10.0);
-            if (ImGui::BeginMenu("Playback Speed")) {
+            if (ImGui::BeginMenu((ICON_SPEED + "  Playback Speed").c_str())) {
                 for (const float option : speedOptions) {
                     char label[16];
                     std::snprintf(label, sizeof(label), "%.2fx", option);
@@ -3929,7 +4072,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                 }
                 ImGui::EndMenu();
             }
-            if (ImGui::BeginMenu("Aspect Ratio")) {
+            if (ImGui::BeginMenu((ICON_ASPECT + "  Aspect Ratio").c_str())) {
                 const double aspectOverride = mpv_get_double(mpv, "video-aspect-override", -1.0);
                 auto aspectItem = [&](const char* label, double value) {
                     const bool selected = (value < 0.0)
@@ -3947,7 +4090,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                 aspectItem("1:1", 1.0);
                 ImGui::EndMenu();
             }
-            if (ImGui::BeginMenu("Subtitles")) {
+            if (ImGui::BeginMenu((ICON_SUBS + "  Subtitles").c_str())) {
                 bool subVisible = mpv_get_flag(mpv, "sub-visibility", true);
                 if (ImGui::MenuItem("Enabled", nullptr, subVisible)) {
                     subVisible = !subVisible;
@@ -3960,7 +4103,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
             }
             if (!hasMedia)
                 ImGui::EndDisabled();
-            if (ImGui::BeginMenu("Panels")) {
+            if (ImGui::BeginMenu((ICON_OVERLAY + "  Panels").c_str())) {
                 if (ImGui::MenuItem("Chat", nullptr, app.showChat)) {
                     app.showChat = !app.showChat;
                     if (app.showChat) {
@@ -3968,6 +4111,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                         app.showSubs = false;
                         app.showSession = false;
                         app.showSettings = false;
+                    app.showPlaylist = false;
                     }
                 }
                 if (ImGui::MenuItem("Voice Call", nullptr, app.showCall)) {
@@ -3977,6 +4121,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                         app.showSubs = false;
                         app.showSession = false;
                         app.showSettings = false;
+                    app.showPlaylist = false;
                     }
                 }
                 if (ImGui::MenuItem("Session", nullptr, app.showSession)) {
@@ -3986,6 +4131,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                         app.showSubs = false;
                         app.showChat = false;
                         app.showSettings = false;
+                    app.showPlaylist = false;
                     }
                 }
                 if (!hasMedia)
@@ -3997,6 +4143,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                         app.showChat = false;
                         app.showSession = false;
                         app.showSettings = false;
+                    app.showPlaylist = false;
                     }
                 }
                 if (!hasMedia)
@@ -4008,6 +4155,17 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                         app.showSubs = false;
                         app.showChat = false;
                         app.showSession = false;
+                        app.showPlaylist = false;
+                    }
+                }
+                if (ImGui::MenuItem("Playlist", nullptr, app.showPlaylist)) {
+                    app.showPlaylist = !app.showPlaylist;
+                    if (app.showPlaylist) {
+                        app.showCall = false;
+                        app.showSubs = false;
+                        app.showChat = false;
+                        app.showSession = false;
+                        app.showSettings = false;
                     }
                 }
                 ImGui::Separator();
@@ -4020,9 +4178,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
             ImGui::Separator();
             if (ImGui::MenuItem("Keyboard Shortcuts", "F1"))
                 showShortcuts = true;
-            if (ImGui::MenuItem(g_fullscreen ? "Windowed" : "Fullscreen"))
+            if (ImGui::MenuItem(g_fullscreen ? (ICON_WINDOW + "  Windowed").c_str()
+                                             : (ICON_FULLSCREEN + "  Fullscreen").c_str()))
                 g_pendingToggleFullscreen = true;
-            if (ImGui::MenuItem("Copy Session Link")) {
+            if (ImGui::MenuItem((ICON_SESSION + "  Copy Session Link").c_str())) {
                 const std::string url = session.serverUrl();
                 const std::string code = session.sessionCode();
                 if (!code.empty()) {
@@ -4098,6 +4257,48 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                 urlFocusPending = true;
                 showOpenUrlDialog = false;
             }
+            if (ImGui::IsWindowHovered(hoverFlags))
+                uiHovered = true;
+            ImGui::End();
+            ImGui::PopStyleVar(2);
+        }
+
+        // Ctrl+V'd a link: confirm before streaming it.
+        if (!pendingPasteUrl.empty()) {
+            const float dlgW = std::min(tune(540.0f), static_cast<float>(ui_w) - tune(48.0f));
+            ImGui::SetNextWindowPos(ImVec2(static_cast<float>(ui_w) * 0.5f,
+                                           static_cast<float>(ui_h) * 0.40f),
+                                    ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(dlgW, 0.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.96f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, tune(12.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(tune(18.0f), tune(14.0f)));
+            ImGui::Begin("##PasteUrlPrompt", nullptr,
+                         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_AlwaysAutoResize);
+            if (font22)
+                ImGui::PushFont(font22);
+            ImGui::TextUnformatted("Stream this link?");
+            if (font22)
+                ImGui::PopFont();
+            ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_CheckMark]);
+            ImGui::TextWrapped("%s", pendingPasteUrl.c_str());
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
+            const float btnW = tune(96.0f);
+            ImGui::SetCursorPosX(ImGui::GetWindowWidth() - btnW * 2.0f - tune(18.0f) - tune(8.0f));
+            if (ImGui::Button("Stream", ImVec2(btnW, 0.0f)) ||
+                ImGui::IsKeyPressed(ImGuiKey_Enter)) {
+                openNetworkUrl(pendingPasteUrl);
+                pendingPasteUrl.clear();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(btnW, 0.0f)) ||
+                ImGui::IsKeyPressed(ImGuiKey_Escape))
+                pendingPasteUrl.clear();
             if (ImGui::IsWindowHovered(hoverFlags))
                 uiHovered = true;
             ImGui::End();
@@ -4200,6 +4401,99 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                 uiHovered = true;
             ImGui::End();
             ImGui::PopStyleVar(2);
+        }
+
+        // Drop-target overlay: dim everything and invite the drop while files are
+        // dragged over the window.
+        if (g_dropHovering) {
+            ImDrawList* od = ImGui::GetForegroundDrawList();
+            od->AddRectFilled(ImVec2(0, 0),
+                              ImVec2(static_cast<float>(ui_w), static_cast<float>(ui_h)),
+                              ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, 0.45f)));
+            const char* dropTitle = "Drop to play";
+            const char* dropSub = "Multiple files are added to the queue";
+            ImFont* bigFont = font22 ? font22 : ImGui::GetFont();
+            const ImVec2 t1 = bigFont->CalcTextSizeA(bigFont->FontSize, FLT_MAX, 0.0f, dropTitle);
+            const ImVec2 t2 = ImGui::CalcTextSize(dropSub);
+            const float cardW = std::max(t1.x, t2.x) + tune(56.0f);
+            const float cardH = t1.y + t2.y + tune(44.0f);
+            const ImVec2 mn((static_cast<float>(ui_w) - cardW) * 0.5f,
+                            (static_cast<float>(ui_h) - cardH) * 0.5f);
+            const ImVec2 mx(mn.x + cardW, mn.y + cardH);
+            od->AddRectFilled(mn, mx,
+                              ImGui::ColorConvertFloat4ToU32(ImVec4(0.10f, 0.11f, 0.14f, 0.96f)),
+                              tune(14.0f));
+            ImVec4 borderCol = ImGui::GetStyle().Colors[ImGuiCol_CheckMark];
+            borderCol.w = 0.85f;
+            od->AddRect(mn, mx, ImGui::ColorConvertFloat4ToU32(borderCol), tune(14.0f), 0, 2.0f);
+            od->AddText(bigFont, bigFont->FontSize,
+                        ImVec2(mn.x + (cardW - t1.x) * 0.5f, mn.y + tune(14.0f)),
+                        ImGui::GetColorU32(ImGuiCol_Text), dropTitle);
+            od->AddText(ImVec2(mn.x + (cardW - t2.x) * 0.5f, mn.y + tune(14.0f) + t1.y + tune(8.0f)),
+                        ImGui::GetColorU32(ImGuiCol_TextDisabled), dropSub);
+        }
+
+        // Seek feedback: a round chevron-wave badge on the corresponding side of
+        // the video; rapid presses accumulate into one total.
+        {
+            const double seekAge = ImGui::GetTime() - seekPillAt;
+            if (seekAge >= 0.0 && seekAge < 0.8 && std::abs(seekPillDelta) > 0.01) {
+                // Netflix-style seek badge: a round disc that pops in place (no drift)
+                // with three chevrons lighting up in a wave travelling in the seek
+                // direction, and the accumulated seconds beneath them.
+                // Restrained, professional look: quiet dark disc, no overshoot
+                // (easeOutCubic), slim chevrons with a gentle directional wave, and
+                // the seconds set small and muted beneath.
+                const bool fwd = seekPillDelta > 0.0;
+                float aOut = 1.0f;
+                if (seekAge > 0.55)
+                    aOut = 1.0f - static_cast<float>((seekAge - 0.55) / 0.25);
+                const float aIn = std::clamp(static_cast<float>(seekAge) / 0.08f, 0.0f, 1.0f);
+                const float alpha = std::min(aIn, aOut);
+                const float pp = std::clamp(static_cast<float>(seekAge) / 0.20f, 0.0f, 1.0f);
+                const float easeOut = 1.0f - std::pow(1.0f - pp, 3.0f);
+                const float R = tune(34.0f) * (0.92f + 0.08f * easeOut);
+                const float cx = fwd ? viewW * 0.82f : viewW * 0.18f;
+                const float cy = static_cast<float>(ui_h) * 0.5f;
+                ImDrawList* pdl = ImGui::GetWindowDrawList();
+                pdl->AddCircleFilled(ImVec2(cx, cy), R,
+                                     ImGui::ColorConvertFloat4ToU32(
+                                         ImVec4(0.0f, 0.0f, 0.0f, 0.52f * alpha)), 48);
+                pdl->AddCircle(ImVec2(cx, cy), R,
+                               ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, 0.07f * alpha)),
+                               48, 1.0f);
+                // Slim chevron wave, slightly above centre.
+                const float dir = fwd ? 1.0f : -1.0f;
+                const float chH = R * 0.28f;   // half-height
+                const float chW = R * 0.18f;   // horizontal depth
+                const float chSp = R * 0.26f;  // spacing between chevrons
+                const float chCy = cy - R * 0.12f;
+                const float wave = std::fmod(static_cast<float>(seekAge) * 1.6f, 1.0f);
+                const float th = std::max(1.8f, tune(2.2f));
+                for (int ci = 0; ci < 3; ++ci) {
+                    const float w = wave * 3.0f - static_cast<float>(ci);
+                    const float pulse = std::max(0.0f, 1.0f - std::fabs(w - 0.5f) * 2.0f);
+                    const float ca = (0.22f + 0.73f * pulse) * alpha;
+                    const float baseX = cx + dir * (static_cast<float>(ci) - 1.0f) * chSp -
+                                        dir * chW * 0.5f;
+                    const ImU32 cc = ImGui::ColorConvertFloat4ToU32(
+                        ImVec4(0.96f, 0.97f, 0.98f, ca));
+                    const ImVec2 pts[3] = {
+                        ImVec2(baseX, chCy - chH),
+                        ImVec2(baseX + dir * chW, chCy),
+                        ImVec2(baseX, chCy + chH),
+                    };
+                    pdl->AddPolyline(pts, 3, cc, ImDrawFlags_None, th);
+                }
+                // Seconds, small and muted, below the chevrons.
+                char numText[16];
+                std::snprintf(numText, sizeof(numText), "%.0fs", std::abs(seekPillDelta));
+                const ImVec2 txtSize = ImGui::CalcTextSize(numText);
+                pdl->AddText(ImVec2(cx - txtSize.x * 0.5f, cy + R * 0.26f),
+                             ImGui::ColorConvertFloat4ToU32(
+                                 ImVec4(0.82f, 0.84f, 0.88f, 0.85f * alpha)),
+                             numText);
+            }
         }
 
         // Stream status pill (top-centre): "Connecting" while a network URL is
@@ -4335,6 +4629,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         mpv_render_context_free(renderState.ctx);
     mpv_terminate_destroy(mpv);
 
+    RevokeFileDropTarget(g_hWnd);
     CleanupTaskbar();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
