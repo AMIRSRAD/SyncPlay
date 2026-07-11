@@ -2,11 +2,19 @@
 
 ## What SyncPlay is
 
-A Windows desktop "watch-party" media player. The core idea: **don't stream the
-movie**. Every participant already has their own local copy of the same file; the
-app only synchronizes *playback state* (position, play/pause, speed) plus chat,
-file transfer, and optional voice. This keeps bandwidth tiny and avoids any media
+A Windows desktop "watch-party" media player. The core idea: the app synchronizes
+*playback state* (position, play/pause, speed) plus chat, reactions, file transfer,
+and optional voice — the media itself is not routed through any SyncPlay
 infrastructure.
+
+Two ways to share a source:
+
+1. **Local files** — every participant already has their own copy of the same
+   file; only playback state crosses the wire. Tiny bandwidth, no media servers.
+2. **Network streams** — the host opens a URL (direct `http(s)` media, HLS
+   `.m3u8`, DASH — anything libmpv/ffmpeg speaks) and shares it with the session;
+   guests are prompted, then each streams the *same source URL* directly. No file
+   transfer, and everyone stays in sync exactly as with local files.
 
 ## The relay model
 
@@ -48,20 +56,36 @@ the resulting authoritative `state`, which the guest then applies. This is gated
 
 ## Feature set
 
-- Local video playback through libmpv (MKV/MP4/MOV/AVI/WebM).
-- Host-authoritative sync of play/pause/seek/speed with guest drift correction.
-- Text chat with per-message status + a "system timeline" of session events.
-- Chunked file sharing (128 KB chunks, ≤2 GB) with progress, SHA-1 verification,
-  saved to the Downloads folder.
-- Combined "Files" view (active transfers + recent downloads).
-- Optional 1:1 voice via the relay (miniaudio capture/playback).
-- Subtitle + audio track controls; subtitle styling (font/size/color/position/
-  outline/shadow/spacing).
+**Playback**
+- Local video through libmpv (MKV/MP4/MOV/AVI/WebM), GPU decode (`hwdec=auto-copy-safe`).
+- Network streams by URL (`Ctrl+U` / context menu): direct media, HLS, DASH.
+- Playlist/queue: multi-file drag-drop + multi-select, next/prev, auto-advance.
+- Resume where you left off (mpv watch-later, saved every 5 s and on quit).
+- Subtitle + audio track controls; subtitle styling (font/size/color/position/outline).
+- OpenSubtitles online search + download (user API key; moviehash + filename).
 - Video controls: brightness/contrast/saturation/gamma/hue, tone mapping, GLSL shaders.
-- Playlist + custom timeline UI.
+
+**Watch-party (session)**
+- Host-authoritative sync of play/pause/seek/speed with guest drift correction
+  **and RTT-based latency compensation**.
+- Auto-reconnect with backoff + state resync after a dropped connection.
+- Synced URL sessions (host shares a stream URL; guests consent-prompt then join).
+- Text chat with per-message status, sender avatars, and a "system timeline".
+- Floating **emoji reactions** relayed to everyone over the video.
+- Chunked file sharing (128 KB chunks, ≤2 GB, SHA-1, → Downloads) + combined Files view.
+- Optional 1:1 voice via the relay (miniaudio capture/playback).
+- `syncplay://` invite links (registered per-user + by installer) that auto-join.
+
+**Interface & platform**
+- Dynamic UI accent sampled from the video's dominant colour (toggle in Settings).
+- "Continue watching" resume cards on the idle screen.
+- Timeline/volume glow-up, animated toast cards, micro-animations throughout.
+- Taskbar integration: playback progress, prev/play-pause/next thumb buttons, media keys.
 - Custom borderless Win32 window: rounded corners, custom title bar, app icon,
   per-user "Open With" registration for video extensions.
-- Optional file logging (`%APPDATA%/SyncPlay/syncplay.log`).
+- Optional system-proxy routing (Settings → Connection), keyboard-shortcut overlay (F1).
+- Crash minidumps + optional file logging (`%APPDATA%/SyncPlay/`).
+- Startup update check against GitHub Releases.
 
 ## Technology stack
 
@@ -73,9 +97,11 @@ the resulting authoritative `state`, which the guest then applies. This is gated
 | Text rendering | Direct2D + DirectWrite (for chat / complex scripts / emoji) |
 | Image decode | Windows Imaging Component (WIC) for PNG/ICO |
 | UI | Dear ImGui (vendored in `third_party/imgui`, Win32+DX11 backends) |
-| Media | libmpv, software render (`MPV_RENDER_API_TYPE_SW`) |
+| Media | libmpv, software render (`MPV_RENDER_API_TYPE_SW`), GPU decode via `hwdec` |
 | Networking | libdatachannel (WebSocket only), nlohmann-json |
+| HTTP client | WinHTTP (update check, OpenSubtitles, proxy detection) |
 | Audio (voice) | miniaudio (header-only) |
+| Crash capture | DbgHelp `MiniDumpWriteDump` |
 
 ## Build
 
@@ -103,23 +129,44 @@ gdi32 iphlpapi dwmapi windowscodecs`.
 
 ```
 assets/       app icon + runtime image assets
-core/         header-only helpers (clock, controller iface, sha1, base64, logging, task queue, utf)
-media/        libmpv property/track/playlist helpers
+core/         helpers: clock, controller iface, sha1, base64, logging, task queue,
+              utf, crash_dump, update_check, net_proxy
+media/        libmpv helpers + OpenSubtitles client
 network/      signaling server + client + relay voice
-platform/     Win32 window chrome, D3D11 device, input, file dialog
-render/        software render thread + D3D texture upload
+packaging/    Inno Setup script + build_installer.ps1
+platform/     Win32 window chrome, D3D11 device, input, file dialog, taskbar
+render/       software render thread + D3D texture upload + blur/accent sampling
 scripts/      register_file_associations.ps1
 src/          main.cpp — entry point + entire per-frame loop
 sync/         session orchestration + drift-correction algorithm
 third_party/  vendored ImGui + mpv dev package
-ui/           AppState + config persistence + panel/widget helpers
+ui/           AppState + config persistence + extracted panels + widget helpers
+.github/      release CI workflow
 ```
 
 ## Configuration & data locations
 
-- Config JSON: `%APPDATA%/SyncPlay/config.json`
+- Config JSON: `%APPDATA%/SyncPlay/config.json` (settings, recent-media list,
+  proxy toggle, accent, etc.)
 - ImGui layout: `%APPDATA%/SyncPlay/imgui.ini`
+- Watch-later (resume) positions: `%APPDATA%/SyncPlay/watch_later/`
 - Log (opt-in): `%APPDATA%/SyncPlay/syncplay.log`
+- Crash dumps: `%APPDATA%/SyncPlay/crash-YYYYMMDD-HHMMSS.dmp`
 - Received shared files: user's **Downloads** folder (`FOLDERID_Downloads`).
-- "Open With" registration: `HKCU\Software\Classes` (per-user, no admin), ProgId
-  `SyncPlay.Video`, for `.mp4/.mkv/.mov/.avi/.webm`.
+- Registrations under `HKCU\Software\Classes` (per-user, no admin):
+  - "Open With" ProgId `SyncPlay.Video` for `.mp4/.mkv/.mov/.avi/.webm`.
+  - `syncplay://` URL protocol for invite links.
+
+## Versioning & releases
+
+The app version lives in **one place** — `project(SyncPlay VERSION x.y.z)` in
+`CMakeLists.txt`. It is passed to the app as the `SYNCPLAY_VERSION` compile
+definition (About tab, update check) and parsed by `packaging/build_installer.ps1`.
+The GitHub Actions workflow (`.github/workflows/release.yml`) builds and attaches
+the Inno Setup installer to a Release when a `v*` tag is pushed.
+
+## License
+
+Proprietary — see `LICENSE`. Copyright © Amirsalar Saberi rad, all rights reserved.
+Bundled third-party components (libmpv, Dear ImGui, libdatachannel, nlohmann-json,
+miniaudio, …) retain their own licenses.

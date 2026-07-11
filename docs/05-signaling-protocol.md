@@ -29,10 +29,14 @@
 | `type` | Direction | Fields (besides `type`,`code`) | Meaning |
 |---|---|---|---|
 | `join` | client → server | `role`, `mode` | Join/identify on a session |
-| `state` | host → guests | `timestamp`, `playing`, `speed`, `seq` | Authoritative playback state |
-| `file` | host → guests | `size`, `duration`, `hash` | Local-file identity for verification |
+| `state` | host → guests | `timestamp`, `playing`, `speed`, `seq`, `lat` | Authoritative playback state (+ host one-way latency) |
+| `file` | host → guests | `size`, `duration`, `hash` | Source identity for verification (local hash or `url:<link>`) |
+| `open_url` | host → guests | `url` | Host is sharing a network stream URL (guest consent-prompts) |
 | `chat` | any → others | `text` | Chat message |
+| `reaction` | any → others | `emoji` | Ephemeral floating emoji reaction (≤ 16 bytes) |
 | `intent` | guest → host | `action`, `value` | Control request (play/pause/seek/seek_delta/speed) |
+| `ping` | client → server | `t` | RTT probe (echoed back) |
+| `pong` | server → client | `t` | Echo of `ping` (RTT = now − t) |
 | `share_meta` | sender → others | `id`, `name`, `size`, `totalChunks`, `sender` | Start of a file transfer |
 | `share_chunk` | sender → others | `id`, `index`, `data` (base64) | One file chunk |
 | `share_done` | sender → others | `id`, `sha1?` | End of transfer (+ optional checksum) |
@@ -47,12 +51,29 @@
 ## Server authorization rules (`onTextMessage`)
 
 - Only **guests** may send `intent`.
-- Only the **host** may send `file`.
-- `state` / `file` / `chat` are rejected outside `relay` mode (the only mode).
+- Only the **host** may send `file` and `open_url`.
+- `ping` is echoed as `pong` to the sender (works pre-join, so latency is known
+  before the first `state`).
+- `state` / `file` / `chat` / `reaction` / `open_url` are rejected outside `relay`
+  mode (the only mode).
 - `relay_voice_*` requires **≤ 1 guest** (point-to-point voice) and routes
   host ↔ the single guest.
-- Fan-out: `state`/`file` host → all guests; `chat`/`share_*` host → all guests and
-  guest → host + other guests.
+- Fan-out: `state`/`file`/`open_url` host → all guests; `chat`/`reaction`/`share_*`
+  host → all guests and guest → host + other guests.
+
+## App-wide proxy
+
+When the "Use system proxy" setting is on, the app reads the Windows proxy
+(`net_proxy`) and applies it everywhere it touches the network: the signaling
+WebSocket (`SignalingClient::setProxy`, **loopback exempt** so self-hosting works),
+mpv's `http-proxy` for stream playback, and the WinHTTP helpers (update check,
+OpenSubtitles). Off by default — all connections are then direct.
+
+## Invite links
+
+`syncplay://join?code=<code>&url=<ws-url>` deep links (produced by "Copy Session
+Link", registered per-user at startup and by the installer). Launching one parses
+the query and auto-joins as guest. See [03-subsystem-map.md](03-subsystem-map.md).
 
 ## Client robustness
 

@@ -28,7 +28,9 @@ server/client/voice and drives the file-share sender, then — **only if** hosti
 `sendStateNow()` every `m_sendInterval = 1500 ms`.
 
 `sendStateNow()` captures local state, stamps `seq`, and (gated on
-`m_localFile.valid && guestCount > 0`) sends `sendRelayState(time, playing, speed, seq)`.
+`m_localFile.valid && guestCount > 0`) sends
+`sendRelayState(time, playing, speed, seq, rttSeconds()*0.5)` — the trailing
+argument is the host's one-way latency estimate (`lat` on the wire).
 
 The host **also** sends immediately on any local control action
 (`notifyLocalAction` → `sendStateNow`) and right after a guest joins, so changes
@@ -40,12 +42,28 @@ propagate without waiting for the 1500 ms timer.
 
 ## Guest apply path
 
-`onRelayState(time, playing, speed, seq)`:
+`onRelayState(time, playing, speed, seq, hostLatency)`:
 1. Drop if `seq <= m_lastRemoteSeq` (dedup / ordering — no gap detection).
-2. Record `m_lastRemoteTime` and `m_lastRemoteAt = steady_clock::now()`.
-3. Update remote playing/speed bookkeeping (fires Play/Pause/Speed UI actions on change).
-4. Decide `allowImmediate` (true only within the 1500 ms post-seek window).
-5. Call `m_sync.applyState(state, allowImmediate)`.
+2. **Latency compensation (while playing):** the host captured `time` before the
+   packet crossed host → server → us, so its playhead has already advanced. Add the
+   estimated transit — `hostLatency` (the host's one-way `lat`) plus the guest's own
+   half-RTT — to `time`, scaled by `speed`. Clamped to ≤ 1 s so a bad estimate can
+   never inject a large artificial seek.
+3. Record `m_lastRemoteTime` and `m_lastRemoteAt = steady_clock::now()`.
+4. Update remote playing/speed bookkeeping (fires Play/Pause/Speed UI actions on change).
+5. Decide `allowImmediate` (true only within the 1500 ms post-seek window).
+6. Call `m_sync.applyState(state, allowImmediate)`.
+
+So drift correction now converges to **true** alignment rather than a
+latency-offset one.
+
+## RTT / latency measurement
+
+Both peers keep a smoothed round-trip estimate to the relay: `tick()` sends a
+`ping` every 2 s, the server echoes `pong` with the original timestamp, and
+`SignalingClient::rttSeconds()` maintains an EMA of the measured RTT. The host tags
+each `state` with its one-way latency (`rttSeconds() * 0.5` → wire field `lat`);
+the guest adds its own half-RTT in step 2 above.
 
 ## Drift correction (`SyncManager::applyState`)
 
@@ -86,15 +104,15 @@ Host `onRelayIntent` → `applyControlIntent` (gated on `hosting && m_allowGuest
 action, then `sendStateNow()` to rebroadcast the authoritative result. Unknown
 actions are ignored. `m_allowGuestControl` lets the host lock out guest control.
 
-## Clock handling — important caveat
+## Clock handling
 
-There is **no clock-offset / NTP-style synchronization and no latency compensation**
-in the protocol. `SyncState.time` is the raw playback position at send time, so
-transmission latency (plus up to the 1500 ms send interval) becomes drift directly.
-The soft rate loop is the only mechanism that closes that gap, and only for drift
-between 0.05 s and 1.0 s.
+There is still no NTP-style absolute clock sync, but transmission latency **is**
+now compensated: the guest extrapolates the host's playhead by the estimated
+transit time (host one-way `lat` + guest half-RTT) before applying `state` (see the
+guest-apply path above). What remains uncompensated is the up-to-1500 ms host send
+interval, which the soft rate loop closes for drift between 0.05 s and 1.0 s.
 
-The only time extrapolation is display-only: `syncDriftSeconds()` advances
+A separate, display-only extrapolation: `syncDriftSeconds()` advances
 `m_lastRemoteTime` by `(now − m_lastRemoteAt) * remoteSpeed` while the remote is
 playing, to estimate live drift for `syncConfidenceText()`:
 
@@ -113,6 +131,18 @@ sends via `sendRelayFile` when a guest is present; the guest verifies in
 `updateFileVerification`: size match **and** non-empty hash match **and** duration
 within 0.5 s. The hash is `computePartialHashHexUtf8` — SHA-1 of the **first 2 MB**.
 Host requires only `m_localFile.valid` to broadcast.
+
+**Network streams** verify by URL identity instead of content hash: a URL source is
+recorded as `size = 1`, `hash = "url:<the-url>"`, so two peers on the same shared
+URL match. The shared URL is delivered by the host-only `open_url` message (with a
+guest consent prompt) and re-sent to late joiners.
+
+## Reconnect resync
+
+On an unexpected disconnect the client auto-rejoins with backoff (see
+[03-subsystem-map.md](03-subsystem-map.md)). When the host's connection comes back
+(`onConnectionStateChanged` while hosting + joined) it re-pushes file info, any
+active shared URL, and current state, so guests resync automatically after a blip.
 
 ## Two-peer assumptions
 
@@ -133,6 +163,7 @@ for one.
 | Field | Value | Meaning |
 |---|---|---|
 | `m_sendInterval` | 1500 ms | host state broadcast period (while playing) |
+| `m_pingInterval` | 2000 ms | RTT ping cadence (both sides) |
 | `m_allowImmediateSeekWindow` | 1500 ms | guest snap-seek window after a local seek |
 | `m_shareChunkSize` | 128 KB | file-share chunk size |
 | `m_shareMaxBytes` | 2 GB | max shared-file size |

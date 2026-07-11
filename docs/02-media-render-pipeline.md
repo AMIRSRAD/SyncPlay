@@ -7,12 +7,18 @@ File → libmpv (demux + decode) → MPV_RENDER_API_TYPE_SW
      → CPU BGRA buffer (double-buffered) → D3D11 dynamic texture → ImGui background draw list
 ```
 
-libmpv does all demuxing/decoding/AV-sync. Instead of letting mpv own a window,
-SyncPlay uses mpv's **software render API**: mpv draws each frame into a CPU-side
-BGRA bitmap that the app uploads to a Direct3D 11 texture and composites under the
-ImGui UI. This is configured in `src/main.cpp` (~lines 1023–1027): `vo=libmpv`,
-`vid=auto`, `hwdec=auto-safe`, `keep-open=yes`, `cache=yes`, render context type
-`MPV_RENDER_API_TYPE_SW`.
+libmpv does all demuxing/decoding/AV-sync (local files **and** network URLs — its
+ffmpeg backend speaks `http(s)`, HLS, DASH, etc.). Instead of letting mpv own a
+window, SyncPlay uses mpv's **software render API**: mpv draws each frame into a
+CPU-side BGRA bitmap that the app uploads to a Direct3D 11 texture and composites
+under the ImGui UI. Configured in `src/main.cpp` at init:
+- `vo=libmpv`, `vid=auto`, `keep-open=yes`, `cache=yes`, render type `MPV_RENDER_API_TYPE_SW`.
+- `hwdec=auto-copy-safe` — decode on the GPU (D3D11VA/DXVA2) and copy the frame
+  back to the SW buffer. Plain `auto-safe` would pick *native* zero-copy modes the
+  SW render API can't consume, silently falling back to CPU decoding.
+- `watch-later-dir` / `save-position-on-quit=yes` — resume support (position only).
+- `http-proxy` — set when the system-proxy toggle is on (see
+  [05-signaling-protocol.md](05-signaling-protocol.md) for the app-wide proxy).
 
 ## Threading model
 
@@ -62,22 +68,26 @@ and the UI thread:
 
 ## D3D texture upload
 
-`update_video_texture` (`render/render_sw.cpp`) runs on the UI thread:
-locks, snapshots the front buffer's width/height/stride/pointer, then maps
-`g_videoTex` with `D3D11_MAP_WRITE_DISCARD`, `memcpy`s each row, **forces every
-pixel's alpha byte to 0xFF** (mpv writes `bgr0` with an undefined X byte), and
-unmaps. It silently drops the frame if the SW buffer size ≠ `g_videoTexW/H`
-(during a resize window until the texture is recreated by `EnsureVideoTexture` in
-`platform/`).
+`update_video_texture` (`render/render_sw.cpp`) runs on the UI thread. It **holds
+the state mutex across the whole map/copy** (fixing an earlier use-after-free where
+a concurrent resize could reallocate the front buffer mid-copy), maps `g_videoTex`
+with `D3D11_MAP_WRITE_DISCARD`, and copies each row while forcing opaque alpha in a
+**single 32-bit pass** (`d[x] = s[x] | 0xFF000000u`, since mpv writes `bgr0` with an
+undefined X byte). It silently drops the frame if the SW buffer size ≠
+`g_videoTexW/H` (resize window until `EnsureVideoTexture` recreates it).
+
+Two things ride on the same upload, so they update at frame cadence regardless of
+the glass/accent toggles:
+- **`produce_blur`** — a cheap box-average downsample (~240 px wide) into
+  `g_blurTex`, used as the frosted-glass backdrop behind panels and the title bar.
+  Skipped when the glass toggle is off (`g_glassEnabled`).
+- **Dynamic-accent sampling** — a sparse, saturation-weighted average of the frame
+  (`g_videoAccentColor`), which the UI loop normalises (HSV clamp) and eases into
+  the theme accent so the interface takes on the video's palette.
 
 The texture itself (`g_videoTex` + SRV `g_videoSrv`) is a `DYNAMIC`,
 `CPU_ACCESS_WRITE`, `B8G8R8A8_UNORM` shader resource, created/resized by
 `EnsureVideoTexture` in `platform/platform.cpp`.
-
-> ⚠️ Concurrency note: the upload reads the front buffer *after* releasing the
-> lock; a concurrent resize on the render thread could reallocate that buffer,
-> causing tearing or a use-after-free. See
-> [06-findings-and-issues.md](06-findings-and-issues.md).
 
 ## The playback adapter
 

@@ -46,14 +46,22 @@ mpv locally (+ `notifyLocalAction`) or sends a guest **intent**.
 | `base64.h` | RFC 4648 encode/decode. Used for the WS handshake and for binary payloads (voice frames, file chunks). |
 | `string_utils.h` | `Trim`, `ToLower`, `StartsWith`, `EndsWith` (ASCII). |
 | `utf.{h,cpp}` | `Utf8FromWide` / `WideFromUtf8` via Win32 (Windows-only). |
+| `crash_dump.{h,cpp}` | `InstallCrashHandler` — `SetUnhandledExceptionFilter` + `MiniDumpWriteDump` → `%APPDATA%/SyncPlay/crash-*.dmp` (static buffers only, no CRT/alloc in the handler). |
+| `update_check.{h,cpp}` | Background WinHTTP call to the GitHub Releases API at startup; parses `tag_name`, compares to `SYNCPLAY_VERSION`, exposes the newer version to the UI (toast + About). Silent on any failure. Honours the app proxy. |
+| `net_proxy.{h,cpp}` | `DetectSystemProxy` (reads the Windows/IE proxy via `WinHttpGetIEProxyConfigForCurrentUser`, picks the https/http entry) + `Set/GetAppProxy` (the proxy the app should use; "" = direct). The WinHTTP helpers read it per request. |
 
 ## `media/` + `render/`
 
 - `media/mpv_helpers.{h,cpp}` — typed mpv property accessors + track-list/playlist
   node parsers (`TrackInfo`, `PlaylistItem`). See
   [02-media-render-pipeline.md](02-media-render-pipeline.md).
-- `render/render_sw.{h,cpp}` — `SwRenderState`, the render thread, and the D3D
-  texture upload.
+- `media/opensubtitles.{h,cpp}` — async OpenSubtitles REST client (WinHTTP). Computes
+  the OpenSubtitles **moviehash** (filesize + 64 KiB head/tail sum), searches by
+  hash + filename, downloads an SRT to a temp folder for `sub-add`. All work is on
+  background threads with a generation guard; the UI polls `OsGetSnapshot()`.
+- `render/render_sw.{h,cpp}` — `SwRenderState`, the render thread, the D3D texture
+  upload, `produce_blur` (frosted-glass backdrop) and the dynamic-accent frame
+  sample. See [02-media-render-pipeline.md](02-media-render-pipeline.md).
 
 ## `network/`
 
@@ -70,7 +78,14 @@ mpv locally (+ `notifyLocalAction`) or sends a guest **intent**.
   `TaskQueue` and guarded by a `m_generation` counter so stale-socket callbacks are
   dropped), JSON-encodes all outbound `send*` methods, and buffers outbound messages
   until joined (`queueOrSend`/`flushPending`). Inbound messages dispatch to typed
-  callbacks (state/file/chat/intent/peer-update/voice-frame/share-*).
+  callbacks (state/file/chat/**reaction**/**open_url**/intent/peer-update/voice-frame/share-*).
+  - **Latency/RTT:** `sendPing`/`pong` round-trips maintain a smoothed `rttSeconds()`;
+    `state` carries a `lat` (host one-way latency) field. See [04-sync-algorithm.md](04-sync-algorithm.md).
+  - **Auto-reconnect:** an unexpected drop mid-session schedules a rejoin with
+    exponential backoff (1 s → 10 s) and re-issues the last join; deliberate
+    `disconnect()` clears the arm flag.
+  - **Proxy:** `setProxy(url)` routes the WebSocket through an HTTP proxy; loopback
+    targets always connect directly so self-hosting still works.
 - **`relay_voice.{h,cpp}`** (~320 lines) — `RelayVoice` duplex audio over miniaudio
   (`MINIAUDIO_IMPLEMENTATION` defined here; s16/48kHz/mono). A realtime
   `audioCallback` enqueues captured PCM (cap 64 frames) and drains incoming frames
@@ -90,9 +105,15 @@ mpv locally (+ `notifyLocalAction`) or sends a guest **intent**.
   coalescing during interactive sizing), `CreateDeviceD3D`/`CreateRenderTarget`/
   `EnsureVideoTexture`, `ToggleFullscreen` (fake/borderless), and
   `ApplyCustomWindowChrome` (rounded corners + no border via `DwmSetWindowAttribute`).
-- **`file_dialog.{h,cpp}`** — `openFileDialog` using the modern COM
-  `IFileOpenDialog`, centered on the owner via an `IFileDialogEvents` callback;
-  parses a double-null-terminated filter into `COMDLG_FILTERSPEC`.
+  Also: **`WM_DPICHANGED`** rebakes the ImGui font atlas at the new scale, multi-file
+  **`WM_DROPFILES`** fills `g_dropPaths`, and **taskbar integration** — `ITaskbarList3`
+  progress on the icon, a prev/play-pause/next thumbnail toolbar (glyph icons rendered
+  from Segoe MDL2), and `WM_APPCOMMAND` hardware media keys (`UpdateTaskbar` /
+  `CleanupTaskbar`, driven via `g_pendingPlaylistPrev/Next`).
+- **`file_dialog.{h,cpp}`** — `openFileDialog` / `openFileDialogMulti` (multi-select
+  via `FOS_ALLOWMULTISELECT`) using the modern COM `IFileOpenDialog`, centered on the
+  owner via an `IFileDialogEvents` callback; parses a double-null-terminated filter
+  into `COMDLG_FILTERSPEC`.
 
 The platform layer is decoupled from the rest via globals + one-shot `g_pending*`
 flags that the main loop polls and clears each frame.
@@ -113,16 +134,26 @@ The heart of the app — see [04-sync-algorithm.md](04-sync-algorithm.md).
 
 - **`app_state.{h,cpp}`** — the `AppState` "god struct" (panel visibility/dock flags,
   fixed-size `char[]` input buffers, subtitle/voice/video params, panel geometry, a
-  `deque<ChatLine>` chat log, a `deque<EventToast>`). Plus `load_config`/`save_config`
+  `deque<ChatLine>` chat log, a `deque<EventToast>`, a `vector<RecentMedia>`
+  continue-watching list, and setting flags: `glassPanels`, `dynamicAccent`,
+  `useSystemProxy`, OpenSubtitles key/langs). Plus `load_config`/`save_config`
   (JSON at `%APPDATA%/SyncPlay/config.json`), `computePartialHashHexUtf8` (SHA-1 of
   first 2 MB), and `format_time`.
-  - `ChatLine` carries `who/text/time/kind/status/fileName/fileSize/fileTransferred/transferId/retryPath`.
-  - `ChatLineKind { Text, System, File }`, `ChatLineStatus { None, Sending, Receiving, Sent, Failed, Received }`.
-  - `EventToast { text, ttl }`.
+  - `ChatLine` carries who/text/time/kind/status/file fields + runtime-only
+    `appearAt` (entrance animation).
+  - `EventToast { text, ttl, addedAt }`; `RecentMedia { path, position, duration, lastWatched }`.
+- **`panels.{h,cpp}`** — the right-side panels (Settings / Session / Call / Chat+Files
+  / Subs) extracted out of `main.cpp` into standalone `Draw*Panel(PanelContext&)`
+  functions. `PanelContext` is a per-frame bundle of references + callbacks the main
+  loop passes in (fonts, geometry, `applyAccent`, `openUrl`, chat/reaction extras, …).
+- **`chat_text.h`** — declarations for the shared DirectWrite chat/emoji texture
+  helpers (`RenderChatTextTexture` with an emoji `cropTight` option, caret hit-test,
+  `NeedsComplexText`); definitions live in `main.cpp`.
 - **`panel_utils.{h,cpp}`** — custom floating/dockable panel system: `PanelDragState`,
   `UpdatePanelDrag` (edge/corner hit-testing + clamp; `resizeAxis` bitmask
   1=right,2=bottom,4=left,3=corner), `BeginPanel`/`BeginPanelNoScroll`/`EndPanel`
-  (shadowed ImGui child wrappers), `DockResizeHandle`.
-- **`ui_helpers.{h,cpp}`** — `IconButton`/`IconButtonFont`/`IconToggle`,
-  `DrawIconGlow` (4-direction accent glow), `ShowDelayedTooltip` (hover-dwell),
-  `Utf8FromCodepoint`, and a glow-offset stack.
+  (frosted-glass child wrappers with the slide-in appear animation + `padScale`),
+  `DockResizeHandle`.
+- **`ui_helpers.{h,cpp}`** — `IconButton`/`IconButtonFont`/`IconToggle` (with eased
+  press-scale), `DrawIconGlow` (4-direction accent glow), `StyledTooltip` /
+  `ShowDelayedTooltip` (themed hover-dwell), `Utf8FromCodepoint`, glow-offset stack.

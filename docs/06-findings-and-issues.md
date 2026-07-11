@@ -97,11 +97,12 @@ UI thread could read freed/torn memory.
 > so the render thread cannot swap or reallocate mid-copy. (`WRITE_DISCARD` keeps the
 > map non-blocking, so the render thread only ever waits the brief copy duration.)
 
-### 6. Pause has no heartbeat — [verified] · LOW/MEDIUM
+### 6. Pause has no heartbeat — [verified] · LOW/MEDIUM · partially mitigated
 The host only broadcasts `state` *while playing* (`SyncSession::tick()` guards on
 `isPlaying()`). A pause is sent once at the moment it happens; if that single packet is
-lost, a guest keeps playing with no re-send. (See
-[04-sync-algorithm.md](04-sync-algorithm.md).)
+lost, a guest keeps playing with no re-send. Auto-reconnect resync now re-pushes state
+after a *dropped connection*, but a single lost pause packet on a live socket is still
+not re-sent. (See [04-sync-algorithm.md](04-sync-algorithm.md).)
 
 ### 7. "Preferred interface" bind is non-functional — [observed] · LOW
 `SignalingServer::start` always sets `bindAddress = "0.0.0.0"` and never honors the
@@ -172,18 +173,25 @@ destination after the row `memcpy` (mpv writes `bgr0`).
 **autosave churn**, **non-ASCII partial-hash**, **file-dialog dangling filter pointers**,
 **`BeginPanel` dedup**.
 
-### Deferred — need a compiler in the loop (too risky to do blind)
-- **Extract the panels** out of `main.cpp` into `ui/panels_*.cpp`. Big maintainability
-  win but a large mechanical refactor of tightly-coupled by-reference lambdas; must be
-  compiled/run to verify nothing detached.
-- **Runtime DPI re-scale** on `WM_DPICHANGED` — requires rebuilding the ImGui font
-  atlas (`ImGui_ImplDX11_InvalidateDeviceObjects` + re-bake) mid-loop; needs build +
-  multi-monitor testing.
+### Done since (previously deferred, needed a build)
+- ✅ **Panels extracted** out of `main.cpp` into `ui/panels.{h,cpp}` as
+  `Draw*Panel(PanelContext&)` — the by-reference lambdas became a per-frame
+  `PanelContext` bundle.
+- ✅ **Runtime DPI re-scale** on `WM_DPICHANGED` — the ImGui font atlas is rebaked at
+  the new scale (`ImGui_ImplDX11_InvalidateDeviceObjects` + re-bake).
+- ✅ **Latency compensation + auto-reconnect** — RTT ping/pong, `lat`-corrected guest
+  apply, and backoff rejoin with state resync (see [04-sync-algorithm.md](04-sync-algorithm.md)).
+- ✅ **GPU decode** — `hwdec=auto-copy-safe`.
+- ✅ **Crash minidumps**, **startup update check**, **proprietary `LICENSE`**,
+  single-sourced version + **release CI**.
 
 ### Remaining (design decisions, not bugs)
 - **#9/#10 voice** — Opus + a lock-free audio queue, if voice quality/CPU matters.
+  (Considered and deliberately deferred — bandwidth is fine on LAN.)
 - **#3 plaintext `sessionPassword`** in `config.json` — omit or obfuscate (currently a
   deliberate LAN-convenience choice).
 - **#7 preferred-interface bind** — binding `0.0.0.0` works; honoring the preferred
   interface for the *bind* (not just the advertised URL) is a behavior change.
 - **Reconcile `SyncPlayDoc.txt`** with reality (it describes an unbuilt WebRTC P2P design).
+- **Single-instance invite handoff** — clicking a `syncplay://` link while the app is
+  already running starts a second instance instead of forwarding to the running one.
