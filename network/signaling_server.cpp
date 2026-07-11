@@ -485,13 +485,14 @@ void SignalingServer::onTextMessage(rtc::WebSocket* socket, const std::string& m
         return;
     }
 
-    if (type == "state" || type == "file" || type == "chat" || type == "reaction") {
+    if (type == "state" || type == "file" || type == "chat" || type == "reaction" ||
+        type == "open_url") {
         if (session->mode != "relay") {
             LogWarn("signaling") << "Relay message ignored outside relay session " << type << std::endl;
             return;
         }
-        if (type == "file" && info.role != "host") {
-            LogWarn("signaling") << "Relay message rejected; only host can send file info" << std::endl;
+        if ((type == "file" || type == "open_url") && info.role != "host") {
+            LogWarn("signaling") << "Relay message rejected; only host can send " << type << std::endl;
             return;
         }
         j["code"] = info.code;

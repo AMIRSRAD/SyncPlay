@@ -51,6 +51,9 @@ public:
     bool sendChatMessage(const std::string& message);
     // Ephemeral emoji reaction, relayed to every peer in the session.
     bool sendReaction(const std::string& emoji);
+    // Host shares a network stream URL with the session; guests get a consent
+    // prompt via the open-url callback. Remembered and re-sent to late joiners.
+    void shareOpenUrl(const std::string& url);
     bool sendSharedFile(const std::string& path, std::string* outShareId = nullptr);
     void startVoiceCall();
     void stopVoiceCall();
@@ -79,6 +82,7 @@ public:
 
     using ChatCallback = std::function<void(const std::string&)>;
     using ReactionCallback = std::function<void(const std::string&)>;
+    using OpenUrlCallback = std::function<void(const std::string&)>;
     using ActionCallback = std::function<void(const std::string&)>;
     using StatusCallback = std::function<void()>;
     using ShareProgressCallback = std::function<void(const std::string& id,
@@ -93,6 +97,7 @@ public:
 
     void setChatCallback(ChatCallback cb);
     void setReactionCallback(ReactionCallback cb);
+    void setOpenUrlCallback(OpenUrlCallback cb);
     void setActionCallback(ActionCallback cb);
     void setStatusCallback(StatusCallback cb);
     void setShareProgressCallback(ShareProgressCallback cb);
@@ -214,8 +219,13 @@ private:
     std::string m_statusText;
     std::string m_hintText;
 
+    // Network URL currently shared with the session (host side); re-sent to
+    // guests that join later. Cleared when a local file takes over.
+    std::string m_currentShareUrl;
+
     ChatCallback m_chatCallback;
     ReactionCallback m_reactionCallback;
+    OpenUrlCallback m_openUrlCallback;
     ActionCallback m_actionCallback;
     StatusCallback m_statusCallback;
     ShareProgressCallback m_shareProgressCallback;

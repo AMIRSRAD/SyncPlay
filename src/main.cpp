@@ -1366,6 +1366,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         spawnReaction(emoji);
     });
 
+    // Host shared a stream URL with the session. Never auto-open a remote URL:
+    // the frame loop shows a consent prompt while this is non-empty.
+    static std::string pendingSessionUrl;
+    session.setOpenUrlCallback([&](const std::string& url) {
+        pendingSessionUrl = url;
+    });
+
     session.setChatCallback([&app](const std::string& text) {
         const std::string stamp = ChatTimestamp();
         if (text.rfind("FILE|", 0) == 0) {
@@ -1540,10 +1547,20 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
 
     auto setLocalFileWide = [&](const std::wstring& path) {
         localFile = {};
+        const std::string utf8 = Utf8FromWide(path);
+        // Network streams: the URL itself is the identity. Peers verify by URL
+        // equality instead of a content hash (size 1 is a match-anything sentinel).
+        if (utf8.find("://") != std::string::npos && utf8.rfind("file://", 0) != 0) {
+            localFile.path = utf8;
+            localFile.size = 1;
+            localFile.hash = "url:" + utf8;
+            localFile.valid = true;
+            return;
+        }
         const std::filesystem::path fsPath(path);
         if (!std::filesystem::exists(fsPath) || !std::filesystem::is_regular_file(fsPath))
             return;
-        localFile.path = Utf8FromWide(path);
+        localFile.path = utf8;
         localFile.size = static_cast<int64_t>(std::filesystem::file_size(fsPath));
         localFile.hash = computePartialHashHexUtf8(localFile.path);
         localFile.valid = !localFile.hash.empty();
@@ -1577,6 +1594,19 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
             resetScrubState();
             app.events.push_back({"Loaded file", 2.0f});
         }
+    };
+
+    // Play a network stream URL; when hosting a session, share it so guests can
+    // watch the same source without any file transfer.
+    auto openNetworkUrl = [&](const std::string& url) {
+        if (url.empty())
+            return;
+        const char* cmd[] = { "loadfile", url.c_str(), nullptr };
+        mpv_command(mpv, cmd);
+        setLocalFileUtf8(url);
+        resetScrubState();
+        app.events.push_back({"Opening stream", 2.5f});
+        session.shareOpenUrl(url);
     };
 
     auto openSubtitles = [&]() {
@@ -3811,12 +3841,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         const bool widgetActive = ImGui::IsAnyItemActive();
         const bool widgetFocused = ImGui::IsAnyItemFocused();
         static bool showShortcuts = false;
+        static bool showOpenUrlDialog = false;
         if (!hasTextFocus && !widgetActive && !widgetFocused && !anyPopupOpen) {
             const bool ctrlDown = io.KeyCtrl;
             if (ImGui::IsKeyPressed(ImGuiKey_F1))
                 showShortcuts = !showShortcuts;
             if (showShortcuts && ImGui::IsKeyPressed(ImGuiKey_Escape))
                 showShortcuts = false;
+            if (ctrlDown && ImGui::IsKeyPressed(ImGuiKey_U))
+                showOpenUrlDialog = true;
             if (hasMedia && ImGui::IsKeyPressed(ImGuiKey_Space))
                 togglePlay();
             if (hasMedia && ImGui::IsKeyPressed(ImGuiKey_M))
@@ -3845,6 +3878,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         if (ImGui::BeginPopup("VideoContext")) {
             if (ImGui::MenuItem("Open"))
                 openVideo();
+            if (ImGui::MenuItem("Open URL...", "Ctrl+U"))
+                showOpenUrlDialog = true;
             if (!hasMedia)
                 ImGui::BeginDisabled();
             if (ImGui::MenuItem("Open Subtitles"))
@@ -3981,6 +4016,113 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         }
         ImGui::PopStyleVar(4);
 
+        if (showOpenUrlDialog) {
+            static char urlInput[2048] = "";
+            static bool urlFocusPending = true;
+            const float dlgW = std::min(tune(540.0f), static_cast<float>(ui_w) - tune(48.0f));
+            ImGui::SetNextWindowPos(ImVec2(static_cast<float>(ui_w) * 0.5f,
+                                           static_cast<float>(ui_h) * 0.40f),
+                                    ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(dlgW, 0.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.96f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, tune(12.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(tune(18.0f), tune(14.0f)));
+            ImGui::Begin("##OpenUrl", nullptr,
+                         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_AlwaysAutoResize);
+            if (font22)
+                ImGui::PushFont(font22);
+            ImGui::TextUnformatted("Open URL");
+            if (font22)
+                ImGui::PopFont();
+            ImGui::Separator();
+            ImGui::Spacing();
+            if (urlFocusPending) {
+                ImGui::SetKeyboardFocusHere();
+                urlFocusPending = false;
+            }
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            const bool urlSubmit = ImGui::InputTextWithHint(
+                "##urlfield", "https://example.com/video.mp4  -  or an HLS .m3u8 link",
+                urlInput, sizeof(urlInput), ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::TextDisabled("Direct media links and HLS/DASH streams.");
+            ImGui::Spacing();
+            std::string urlTrimmed = urlInput;
+            while (!urlTrimmed.empty() && (urlTrimmed.front() == ' ' || urlTrimmed.front() == '"'))
+                urlTrimmed.erase(urlTrimmed.begin());
+            while (!urlTrimmed.empty() && (urlTrimmed.back() == ' ' || urlTrimmed.back() == '"'))
+                urlTrimmed.pop_back();
+            const bool urlValid = urlTrimmed.find("://") != std::string::npos &&
+                                  urlTrimmed.rfind("syncplay://", 0) != 0;
+            const float btnW = tune(90.0f);
+            ImGui::SetCursorPosX(ImGui::GetWindowWidth() - btnW * 2.0f - tune(18.0f) - tune(8.0f));
+            if (!urlValid)
+                ImGui::BeginDisabled();
+            const bool urlOpenClicked = ImGui::Button("Open", ImVec2(btnW, 0.0f));
+            if (!urlValid)
+                ImGui::EndDisabled();
+            ImGui::SameLine();
+            const bool urlCancel = ImGui::Button("Cancel", ImVec2(btnW, 0.0f));
+            if ((urlSubmit || urlOpenClicked) && urlValid) {
+                openNetworkUrl(urlTrimmed);
+                urlInput[0] = '\0';
+                urlFocusPending = true;
+                showOpenUrlDialog = false;
+            }
+            if (urlCancel || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                urlFocusPending = true;
+                showOpenUrlDialog = false;
+            }
+            if (ImGui::IsWindowHovered(hoverFlags))
+                uiHovered = true;
+            ImGui::End();
+            ImGui::PopStyleVar(2);
+        }
+
+        // Consent prompt for a stream URL shared by the session host. Nothing is
+        // fetched until the user explicitly accepts.
+        if (!pendingSessionUrl.empty()) {
+            const float dlgW = std::min(tune(540.0f), static_cast<float>(ui_w) - tune(48.0f));
+            ImGui::SetNextWindowPos(ImVec2(static_cast<float>(ui_w) * 0.5f,
+                                           static_cast<float>(ui_h) * 0.40f),
+                                    ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(dlgW, 0.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.96f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, tune(12.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(tune(18.0f), tune(14.0f)));
+            ImGui::Begin("##SessionUrlPrompt", nullptr,
+                         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_AlwaysAutoResize);
+            if (font22)
+                ImGui::PushFont(font22);
+            ImGui::TextUnformatted("Watch together");
+            if (font22)
+                ImGui::PopFont();
+            ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::TextUnformatted("The host wants to watch this stream:");
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_CheckMark]);
+            ImGui::TextWrapped("%s", pendingSessionUrl.c_str());
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
+            const float btnW = tune(110.0f);
+            ImGui::SetCursorPosX(ImGui::GetWindowWidth() - btnW * 2.0f - tune(18.0f) - tune(8.0f));
+            if (ImGui::Button("Open stream", ImVec2(btnW, 0.0f))) {
+                openNetworkUrl(pendingSessionUrl);
+                pendingSessionUrl.clear();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Ignore", ImVec2(btnW, 0.0f)))
+                pendingSessionUrl.clear();
+            if (ImGui::IsWindowHovered(hoverFlags))
+                uiHovered = true;
+            ImGui::End();
+            ImGui::PopStyleVar(2);
+        }
+
         if (showShortcuts) {
             struct ShortcutRow { const char* keys; const char* action; };
             static const ShortcutRow kShortcuts[] = {
@@ -3988,6 +4130,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
                 {"M", "Mute / Unmute"},
                 {"Left / Right", "Seek 5s  (Ctrl: 10s)"},
                 {"Up / Down", "Volume 5  (Ctrl: 10)"},
+                {"Ctrl+U", "Open network URL"},
                 {"F11  or  Alt+Enter", "Toggle fullscreen"},
                 {"Esc", "Exit fullscreen"},
                 {"Double-click video", "Toggle fullscreen"},

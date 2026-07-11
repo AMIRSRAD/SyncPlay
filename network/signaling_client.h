@@ -19,6 +19,7 @@ public:
     using RelayFileCallback = std::function<void(int64_t size, double duration, const std::string& hash)>;
     using RelayChatCallback = std::function<void(const std::string& text)>;
     using RelayReactionCallback = std::function<void(const std::string& emoji)>;
+    using RelayOpenUrlCallback = std::function<void(const std::string& url)>;
     using RelayIntentCallback = std::function<void(const std::string& action, double value)>;
     using PeerUpdateCallback = std::function<void(bool hostOnline, int guestCount)>;
     using RelayVoiceFrameCallback = std::function<void(const std::vector<uint8_t>& data)>;
@@ -51,6 +52,7 @@ public:
     void sendRelayFile(int64_t size, double duration, const std::string& hash);
     void sendRelayChat(const std::string& text);
     void sendRelayReaction(const std::string& emoji);
+    void sendRelayOpenUrl(const std::string& url);
     void sendRelayIntent(const std::string& action, double value);
     void sendShareMeta(const std::string& id, const std::string& name, int64_t size, int totalChunks, const std::string& sender);
     void sendShareChunk(const std::string& id, int index, const std::vector<uint8_t>& data);
@@ -69,6 +71,7 @@ public:
     void setRelayFileCallback(RelayFileCallback cb);
     void setRelayChatCallback(RelayChatCallback cb);
     void setRelayReactionCallback(RelayReactionCallback cb);
+    void setRelayOpenUrlCallback(RelayOpenUrlCallback cb);
     void setRelayIntentCallback(RelayIntentCallback cb);
     void setPeerUpdateCallback(PeerUpdateCallback cb);
     void setShareMetaCallback(ShareMetaCallback cb);
@@ -118,6 +121,7 @@ private:
     RelayFileCallback m_relayFileCb;
     RelayChatCallback m_relayChatCb;
     RelayReactionCallback m_relayReactionCb;
+    RelayOpenUrlCallback m_relayOpenUrlCb;
     RelayIntentCallback m_relayIntentCb;
     PeerUpdateCallback m_peerUpdateCb;
     ShareMetaCallback m_shareMetaCb;

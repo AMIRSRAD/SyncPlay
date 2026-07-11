@@ -213,6 +213,10 @@ void SignalingClient::setRelayChatCallback(RelayChatCallback cb) {
     m_relayChatCb = std::move(cb);
 }
 
+void SignalingClient::setRelayOpenUrlCallback(RelayOpenUrlCallback cb) {
+    m_relayOpenUrlCb = std::move(cb);
+}
+
 void SignalingClient::setRelayReactionCallback(RelayReactionCallback cb) {
     m_relayReactionCb = std::move(cb);
 }
@@ -337,6 +341,10 @@ void SignalingClient::onTextMessage(const std::string& message) {
             std::string emoji = j.value("emoji", "");
             if (!emoji.empty() && emoji.size() <= 16 && m_relayReactionCb)
                 m_relayReactionCb(emoji);
+        } else if (type == "open_url") {
+            std::string url = j.value("url", "");
+            if (!url.empty() && url.size() <= 2048 && m_relayOpenUrlCb)
+                m_relayOpenUrlCb(url);
         } else if (type == "intent") {
             std::string action = j.value("action", "");
             double value = j.value("value", 0.0);
@@ -464,6 +472,16 @@ void SignalingClient::sendRelayReaction(const std::string& emoji) {
     j["code"] = m_sessionCode;
     j["emoji"] = emoji;
     // Reactions are ephemeral; drop rather than queue when disconnected.
+    queueOrSend(j.dump());
+}
+
+void SignalingClient::sendRelayOpenUrl(const std::string& url) {
+    if (url.empty() || url.size() > 2048)
+        return;
+    nlohmann::json j;
+    j["type"] = "open_url";
+    j["code"] = m_sessionCode;
+    j["url"] = url;
     queueOrSend(j.dump());
 }
 

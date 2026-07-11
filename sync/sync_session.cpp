@@ -87,6 +87,11 @@ SyncSession::SyncSession(PlaybackController* player)
         if (m_reactionCallback)
             m_reactionCallback(emoji);
     });
+    m_signalingClient.setRelayOpenUrlCallback([this](const std::string& url) {
+        // Guests only; the UI shows a consent prompt before opening anything.
+        if (!m_hostingSession && m_openUrlCallback)
+            m_openUrlCallback(url);
+    });
     m_signalingClient.setRelayIntentCallback([this](const std::string& action, double value) {
         onRelayIntent(action, value);
     });
@@ -188,6 +193,9 @@ void SyncSession::setVoiceCaptureDeviceIndex(int index) {
 void SyncSession::setLocalFileInfo(int64_t size, double duration, const std::string& hash) {
     if (size <= 0 || hash.empty())
         return;
+    // Switching from a shared stream URL back to a local file ends the share.
+    if (hash.rfind("url:", 0) != 0)
+        m_currentShareUrl.clear();
     m_localFile.size = size;
     m_localFile.duration = duration;
     m_localFile.hash = hash;
@@ -272,6 +280,7 @@ void SyncSession::disconnectSession() {
     if (m_hostingSession && m_signalingServer.isRunning())
         m_signalingServer.stop();
     m_relayVoice.stop();
+    m_currentShareUrl.clear();
     m_hostingSession = false;
     m_sessionActive = false;
     m_sessionCode.clear();
@@ -571,6 +580,22 @@ void SyncSession::setChatCallback(ChatCallback cb) {
     m_chatCallback = std::move(cb);
 }
 
+void SyncSession::setOpenUrlCallback(OpenUrlCallback cb) {
+    m_openUrlCallback = std::move(cb);
+}
+
+void SyncSession::shareOpenUrl(const std::string& url) {
+    if (url.empty())
+        return;
+    m_currentShareUrl = url;
+    if (!m_hostingSession)
+        return;
+    if (!m_signalingClient.isConnected() || !m_signalingClient.isJoined())
+        return;
+    if (m_relayGuestCount > 0)
+        m_signalingClient.sendRelayOpenUrl(url);
+}
+
 void SyncSession::setReactionCallback(ReactionCallback cb) {
     m_reactionCallback = std::move(cb);
 }
@@ -644,8 +669,12 @@ void SyncSession::onRelayPeerUpdate(bool hostOnline, int guestCount) {
 
     if (m_hostingSession && m_relayGuestCount > 0) {
         sendFileInfoIfReady();
-        if (guestCount > prevGuest)
+        if (guestCount > prevGuest) {
+            // Late joiners need the shared stream URL before state makes sense.
+            if (!m_currentShareUrl.empty())
+                m_signalingClient.sendRelayOpenUrl(m_currentShareUrl);
             sendStateNow();
+        }
     }
 
     if (m_relayVoice.active() && !voiceAvailable())
