@@ -29,29 +29,48 @@ jobs:
 
       - name: Download libmpv dev SDK
         shell: pwsh
+        env:
+          # Authenticate the GitHub API call: unauthenticated api.github.com is
+          # rate-limited from Actions runner IPs and often returns 403.
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-          # mpv does not publish official Windows dev SDKs; zhongfly/mpv-winbuild
-          # provides continuously-built dev packages (same source as local dev).
-          $rel = Invoke-RestMethod "https://api.github.com/repos/zhongfly/mpv-winbuild/releases/latest" -Headers @{ "User-Agent" = "SyncPlay-CI" }
+          # mpv has no official Windows dev SDK; zhongfly/mpv-winbuild publishes
+          # continuously-built dev packages. Pick the baseline x86_64 build (not
+          # v3 — that needs AVX2 which some users' CPUs lack).
+          $headers = @{ "User-Agent" = "SyncPlay-CI"; "Authorization" = "Bearer $env:GH_TOKEN" }
+          $rel = Invoke-RestMethod "https://api.github.com/repos/zhongfly/mpv-winbuild/releases/latest" -Headers $headers
           $asset = $rel.assets | Where-Object { $_.name -match '^mpv-dev-x86_64-\d{8}' -and $_.name -notmatch 'v3' } | Select-Object -First 1
           if (-not $asset) { throw "No mpv-dev-x86_64 asset found in latest mpv-winbuild release" }
           Write-Host "Downloading $($asset.name)"
           Invoke-WebRequest $asset.browser_download_url -OutFile mpv-dev.7z
-          7z x mpv-dev.7z -ompv-dev | Out-Null
+          7z x mpv-dev.7z -ompv-dev -y | Out-Null
 
-          # Stage the SDK the way CMakeLists expects (MPV_ROOT/include, /bin, /lib).
+          # Locate the pieces regardless of the archive's exact layout.
+          $dll = Get-ChildItem mpv-dev -Recurse -Filter libmpv-2.dll | Select-Object -First 1
+          if (-not $dll) { throw "libmpv-2.dll not found in the mpv-dev archive" }
+          $clientH = Get-ChildItem mpv-dev -Recurse -Filter client.h |
+                     Where-Object { $_.Directory.Name -eq 'mpv' } | Select-Object -First 1
+          if (-not $clientH) { throw "mpv headers (include/mpv/client.h) not found" }
+          $incParent = $clientH.Directory.Parent.FullName  # folder that contains mpv/
+
           New-Item -ItemType Directory -Force C:\packages\mpv\bin | Out-Null
           New-Item -ItemType Directory -Force C:\packages\mpv\lib | Out-Null
-          Copy-Item mpv-dev\include C:\packages\mpv\include -Recurse
-          Copy-Item mpv-dev\libmpv-2.dll C:\packages\mpv\bin\
+          New-Item -ItemType Directory -Force C:\packages\mpv\include | Out-Null
+          Copy-Item (Join-Path $incParent 'mpv') C:\packages\mpv\include\ -Recurse -Force
+          Copy-Item $dll.FullName C:\packages\mpv\bin\
 
-          # Generate the MSVC import library. The shipped mpv.def has no LIBRARY
-          # directive; without "LIBRARY libmpv-2.dll" the exe would import the
-          # non-existent "mpv.dll" and fail to launch.
-          $def = Get-Content mpv-dev\mpv.def
-          @("LIBRARY libmpv-2.dll") + $def | Set-Content C:\packages\mpv\lib\mpv.def -Encoding ascii
-          lib.exe /def:C:\packages\mpv\lib\mpv.def /machine:x64 /out:C:\packages\mpv\lib\mpv.lib
+          # Build the MSVC import lib directly from the DLL's exports (no reliance
+          # on a shipped .def). The LIBRARY line MUST name the real DLL, or the exe
+          # imports a non-existent "mpv.dll" and fails to launch.
+          $names = & dumpbin /nologo /exports $dll.FullName |
+            ForEach-Object { if ($_ -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\w\S*)') { $matches[1] } } |
+            Where-Object { $_ }
+          if (-not $names) { throw "No exports parsed from libmpv-2.dll" }
+          @("LIBRARY libmpv-2.dll", "EXPORTS") + $names |
+            Set-Content C:\packages\mpv\lib\mpv.def -Encoding ascii
+          lib /nologo /def:C:\packages\mpv\lib\mpv.def /machine:x64 /out:C:\packages\mpv\lib\mpv.lib
+          Write-Host "Generated mpv.lib with $($names.Count) exports"
 
       - name: Configure
         shell: pwsh
